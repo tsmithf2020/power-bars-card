@@ -9,7 +9,7 @@
  * Local: /local/power-bars-card/power-bars-card.js
  */
 
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 
 /* ---------- utilidades ---------- */
 
@@ -80,8 +80,14 @@ function fmt(v) {
 
 // La escala compartida es lo que hace comparables las barras. Si no se fija un
 // max, se usa el mayor valor presente para que siempre haya una barra llena.
-function scaleFor(group, vals, cfgMax) {
-  const m = group.max !== undefined ? group.max : cfgMax;
+function scaleFor(group, vals, cfgMax, modeMax) {
+  // El max del modo pisa al del grupo: en kWh las escalas de watts no sirven.
+  const m =
+    modeMax !== undefined && modeMax !== null
+      ? modeMax
+      : group.max !== undefined
+      ? group.max
+      : cfgMax;
   if (m !== undefined && m !== null && m !== "auto") {
     const n = parseFloat(m);
     if (Number.isFinite(n) && n > 0) return n;
@@ -91,16 +97,71 @@ function scaleFor(group, vals, cfgMax) {
   return mx > 0 ? mx : 1;
 }
 
+// Un "modo" es otra lectura de las mismas filas: potencia ahora, energia de
+// hoy, energia del mes. Cada fila resuelve a OTRA entidad segun el modo.
+//   - `key`     : la fila trae el entity_id escrito a mano (p.ej. `energy:`)
+//   - `replace` : [de, a] para derivarlo del nombre (`_power` -> `_energy_daily`)
+// Si el modo tiene regla y la fila no la cumple, devuelve null y la fila sale
+// como no disponible. NO cae de vuelta a la entidad base a proposito: eso
+// mezclaria watts dentro de una columna de kWh sin que se note.
+function normModes(cfg) {
+  const m = Array.isArray(cfg.modes) ? cfg.modes.filter(Boolean) : [];
+  return m.length ? m : [{}];
+}
+
+// Si un modo declara `unit` y la entidad viene en otra unidad de la misma
+// familia, se convierte. Sin esto un sensor en Wh dentro de una columna de kWh
+// da un numero 1000 veces mas grande sin ninguna senal de que algo va mal.
+const UNIDADES = { W: 1, kW: 1000, Wh: 1, kWh: 1000, MWh: 1000000 };
+const FAMILIA = { W: "p", kW: "p", Wh: "e", kWh: "e", MWh: "e" };
+
+function convert(v, de, a) {
+  if (v === null || v === undefined || !de || !a || de === a) return v;
+  if (FAMILIA[de] === undefined || FAMILIA[de] !== FAMILIA[a]) return v;
+  return (v * UNIDADES[de]) / UNIDADES[a];
+}
+
+// Inicio de la ventana de un modo, en hora LOCAL.
+//   today   -> medianoche de hoy
+//   month   -> dia 1 del mes
+//   billing -> el dia de corte (billing_day). Si hoy es 5 y el corte es 10,
+//              el ciclo vigente empezo el 10 del mes PASADO.
+function periodStart(period, billingDay, now) {
+  const d = now || new Date();
+  if (period === "today") return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  if (period === "month") return new Date(d.getFullYear(), d.getMonth(), 1);
+  if (period === "billing") {
+    let day = parseInt(billingDay, 10);
+    if (!Number.isFinite(day) || day < 1 || day > 28) day = 1;
+    return d.getDate() >= day
+      ? new Date(d.getFullYear(), d.getMonth(), day)
+      : new Date(d.getFullYear(), d.getMonth() - 1, day);
+  }
+  return null;
+}
+
+function entityFor(e, mode) {
+  if (!mode || (!mode.key && !mode.replace)) return e.entity;
+  if (mode.key && e[mode.key]) return e[mode.key];
+  const r = mode.replace;
+  if (Array.isArray(r) && r.length === 2 && typeof e.entity === "string" && e.entity.includes(r[0]))
+    return e.entity.replace(r[0], r[1]);
+  return null;
+}
+
 // El umbral mas especifico gana: entidad, luego grupo, luego tarjeta.
-function pick(key, entCfg, group, cfg) {
+// Si el MODO define la clave, gana a todos: cambio la magnitud, y los umbrales
+// escritos para watts no valen para kWh.
+function pick(key, entCfg, group, cfg, mode) {
+  if (mode && mode[key] !== undefined && mode[key] !== null) return mode[key];
   for (const src of [entCfg, group, cfg]) {
     if (src && src[key] !== undefined && src[key] !== null) return src[key];
   }
   return undefined;
 }
 
-function resolveThr(entCfg, group, cfg) {
-  const v = pick("zero_threshold", entCfg, group, cfg);
+function resolveThr(entCfg, group, cfg, mode) {
+  const v = pick("zero_threshold", entCfg, group, cfg, mode);
   const n = Number(v);
   return v === undefined || !Number.isFinite(n) ? 1 : n;
 }
@@ -165,13 +226,111 @@ class PowerBarsCard extends HTMLElement {
       throw new Error("Define at least one entity in `entities` or `groups`");
     this._cfg = { ...config };
     this._groups = groups;
+    this._modes = normModes(config);
+    if (this._mi === undefined || this._mi >= this._modes.length)
+      this._mi = this._restoreMode();
     this._built = false;
     if (this._hass) this._render();
+  }
+
+  // El modo elegido es una comodidad de quien mira, no estado compartido: vive
+  // en su navegador. Puede fallar (ventana privada, cookies bloqueadas) y en
+  // ese caso simplemente se arranca en el primero.
+  get _mkey() {
+    return "pbc-mode:" + (this._cfg && this._cfg.title ? this._cfg.title : "-");
+  }
+  _restoreMode() {
+    try {
+      const v = parseInt(window.localStorage.getItem(this._mkey), 10);
+      if (Number.isFinite(v) && v >= 0 && v < this._modes.length) return v;
+    } catch (e) {}
+    return 0;
+  }
+  _saveMode() {
+    try {
+      window.localStorage.setItem(this._mkey, String(this._mi));
+    } catch (e) {}
+  }
+  // Un modo con `period` no lee el estado actual: suma la energia de la ventana
+  // desde las estadisticas de largo plazo, igual que el panel de Energia. Asi
+  // funciona desde el primer dia y sin crear un utility_meter por enchufe.
+  async _fetchStats(mode) {
+    const hass = this._hass;
+    if (!hass || !hass.callWS || !mode || !mode.period) return;
+    const start = periodStart(mode.period, this._cfg.billing_day, new Date());
+    if (!start) return;
+
+    const ids = new Set();
+    for (const g of this._groups)
+      for (const e of g.entities) {
+        const id = entityFor(e, mode);
+        if (id) ids.add(id);
+      }
+    const tcfg = mode.total !== undefined ? mode.total : this._cfg.total;
+    if (typeof tcfg === "string" && tcfg !== "sum") ids.add(tcfg);
+    if (!ids.size) return;
+
+    const clave = this._mi + "|" + start.toISOString();
+    this._statsKey = clave;
+    try {
+      const r = await hass.callWS({
+        type: "recorder/statistics_during_period",
+        start_time: start.toISOString(),
+        end_time: new Date().toISOString(),
+        statistic_ids: [...ids],
+        period: "day",
+        types: ["change"],
+      });
+      const out = {};
+      for (const [id, filas] of Object.entries(r || {})) {
+        let t = 0;
+        for (const f of filas || []) {
+          const c = Number(f.change);
+          if (Number.isFinite(c)) t += c;
+        }
+        out[id] = t;
+      }
+      // Si mientras se esperaba la respuesta cambio el modo, se descarta.
+      if (this._statsKey !== clave) return;
+      this._stats = out;
+      this._statsAt = Date.now();
+      this._statsFor = clave;
+      if (this._built) this._update();
+    } catch (e) {
+      if (this._statsKey === clave) {
+        this._stats = null;
+        this._statsFor = clave;
+        this._statsErr = String((e && e.message) || e);
+        if (this._built) this._update();
+      }
+    }
+  }
+
+  _maybeFetch() {
+    const mode = this._modes[this._mi] || {};
+    if (!mode.period) return;
+    const start = periodStart(mode.period, this._cfg.billing_day, new Date());
+    const clave = this._mi + "|" + (start ? start.toISOString() : "");
+    const viejo = !this._statsAt || Date.now() - this._statsAt > 5 * 60 * 1000;
+    if (this._statsFor !== clave || viejo) {
+      if (this._pidiendo === clave && !viejo) return;
+      this._pidiendo = clave;
+      this._fetchStats(mode);
+    }
+  }
+
+  _setMode(i) {
+    if (i === this._mi || i < 0 || i >= this._modes.length) return;
+    this._mi = i;
+    this._saveMode();
+    this._maybeFetch();
+    this._render();
   }
 
   set hass(hass) {
     this._hass = hass;
     if (!this._cfg) return;
+    this._maybeFetch();
     if (!this._built) this._render();
     else this._update();
   }
@@ -197,6 +356,16 @@ class PowerBarsCard extends HTMLElement {
         color: var(--primary-text-color); font-variant-numeric: tabular-nums;
       }
       .total .u { font-size: .78em; color: var(--secondary-text-color); margin-left: 2px; }
+      .modes { display: flex; gap: 4px; margin-left: 8px; }
+      .modes button {
+        font: inherit; font-size: .72rem; padding: 2px 8px; cursor: pointer;
+        border: 1px solid var(--divider-color); border-radius: 999px;
+        background: transparent; color: var(--secondary-text-color);
+      }
+      .modes button.sel {
+        background: var(--primary-color); border-color: var(--primary-color);
+        color: var(--text-primary-color, #fff);
+      }
       .grp {
         font-size: .74rem; font-weight: 600; letter-spacing: .07em;
         text-transform: uppercase; color: var(--secondary-text-color);
@@ -256,9 +425,21 @@ class PowerBarsCard extends HTMLElement {
     const two = cfg.columns === 2 || cfg.columns === "2";
     const parts = [];
 
+    const varios = this._modes.length > 1;
     parts.push(`<ha-card>`);
-    if (cfg.title || cfg.show_total !== false) {
+    if (cfg.title || cfg.show_total !== false || varios) {
       parts.push(`<div class="title"><span>${esc(cfg.title || "")}</span>`);
+      if (varios) {
+        parts.push(`<span class="modes">`);
+        this._modes.forEach((m, i) => {
+          parts.push(
+            `<button id="m${i}" class="${i === this._mi ? "sel" : ""}">${esc(
+              m.name || "Mode " + (i + 1)
+            )}</button>`
+          );
+        });
+        parts.push(`</span>`);
+      }
       if (cfg.show_total !== false)
         parts.push(`<span class="total" id="tot"></span>`);
       parts.push(`</div>`);
@@ -277,6 +458,11 @@ class PowerBarsCard extends HTMLElement {
     if (cfg.name_width)
       this.shadowRoot.host.style.setProperty("--pbc-name-w", cfg.name_width);
 
+    this._modes.forEach((m, i) => {
+      const b = this.shadowRoot.getElementById("m" + i);
+      if (b) b.onclick = () => this._setMode(i);
+    });
+
     this._built = true;
     this._update();
   }
@@ -291,10 +477,18 @@ class PowerBarsCard extends HTMLElement {
     // `total` puede ser el entity_id de un medidor. Sumar todas las filas solo
     // es correcto si son circuitos independientes; cuando unos cuelgan de otros
     // (un tablero general y sus enchufes) la suma cuenta dos veces lo mismo.
-    const totalEnt =
-      typeof cfg.total === "string" && cfg.total !== "sum" ? cfg.total : null;
+    const mode = this._modes[this._mi] || {};
+    const usaStats = !!mode.period;
+    const pendiente = usaStats && !this._stats;
+    const statVal = (id) => {
+      if (!this._stats) return null;
+      const v = this._stats[id];
+      return Number.isFinite(v) ? v : null;
+    };
+    const tcfg = mode.total !== undefined ? mode.total : cfg.total;
+    const totalEnt = typeof tcfg === "string" && tcfg !== "sum" ? tcfg : null;
     let grand = 0;
-    let unit = cfg.unit || "";
+    let unit = mode.unit || cfg.unit || "";
 
     this._groups.forEach((g, gi) => {
       const wrap = this.shadowRoot.getElementById("w" + gi);
@@ -304,16 +498,24 @@ class PowerBarsCard extends HTMLElement {
 
       // 1. leer
       let items = g.entities.map((e, i) => {
-        const v = numState(hass, e.entity);
-        const thr = resolveThr(e, g, cfg);
+        const id = entityFor(e, mode);           // la entidad de ESTE modo
+        const bruto = id ? (usaStats ? statVal(id) : numState(hass, id)) : null;
+        const uOrig = id ? unitOf(hass, id) : "";
+        const v = mode.unit ? convert(bruto, uOrig, mode.unit) : bruto;
+        const thr = resolveThr(e, g, cfg, mode);
         return {
           cfg: e,
+          id,
           v,
           i,                                     // orden original, para 'active'
           thr,
           on: v !== null && Math.abs(v) >= thr,
+          // El nombre sale SIEMPRE de la entidad base: el friendly_name del
+          // sensor de energia suele ser "... Energy Daily" y ensuciaria la
+          // columna al cambiar de modo.
           name: nameOf(hass, e.entity, e.name),
-          unit: unitOf(hass, e.entity),
+          unit: mode.unit || uOrig,
+          existe: !!(id && hass.states && hass.states[id]),
         };
       });
       for (const it of items) if (it.unit && !unit) unit = it.unit;
@@ -339,24 +541,34 @@ class PowerBarsCard extends HTMLElement {
 
       // 4. escala compartida del grupo: se calcula sobre TODO el grupo, no solo
       //    sobre lo visible, para que esconder los apagados no reescale nada.
-      const scale = scaleFor(g, items.map((i) => i.v), cfg.max);
+      const scale = scaleFor(g, items.map((i) => i.v), cfg.max, mode.max);
 
       // 5. pintar
       const html = ordered
         .map((it) => {
+          // En un modo con escala propia, el max por entidad tampoco aplica.
           const own =
-            it.cfg.max !== undefined && Number(it.cfg.max) > 0
+            mode.max === undefined && it.cfg.max !== undefined && Number(it.cfg.max) > 0
               ? Number(it.cfg.max)
               : scale;
           const frac = it.v === null ? 0 : Math.max(0, Math.min(1, it.v / own));
           const col =
             it.cfg.color ||
-            sevColor(it.v || 0, own, pick("severity", it.cfg, g, cfg));
+            sevColor(it.v || 0, own, pick("severity", it.cfg, g, cfg, mode));
           const cls = "row" + (it.v === null ? " na" : it.on ? "" : " off");
           const u = it.unit || unit;
+          // Dos formas de no tener dato en este modo, y conviene distinguirlas:
+          // no se pudo derivar ninguna entidad, o se derivo una que no existe.
+          // La segunda es la habitual (el enchufe no lleva sensor de energia)
+          // y sin el nombre derivado no hay por donde empezar a mirar.
+          const tip = !it.id
+            ? it.name + " — no entity for this mode"
+            : it.existe
+            ? it.name
+            : it.name + " — " + it.id + " not found";
           return (
-            `<div class="${cls}" data-e="${esc(it.cfg.entity)}">` +
-            `<div class="nm" title="${esc(it.name)}">${esc(it.name)}</div>` +
+            `<div class="${cls}" data-e="${esc(it.id || it.cfg.entity)}">` +
+            `<div class="nm" title="${esc(tip)}">${esc(it.name)}</div>` +
             `<div class="track"><div class="fill" style="width:${(frac * 100).toFixed(1)}%;background:${col}"></div></div>` +
             `<div class="val">${fmt(it.v)}<span class="u">${esc(u)}</span></div>` +
             `</div>`
@@ -375,10 +587,21 @@ class PowerBarsCard extends HTMLElement {
 
     const tot = this.shadowRoot.getElementById("tot");
     if (tot) {
-      const v = totalEnt ? numState(hass, totalEnt) : grand;
+      let v = totalEnt
+        ? usaStats
+          ? statVal(totalEnt)
+          : numState(hass, totalEnt)
+        : grand;
+      if (totalEnt && mode.unit) v = convert(v, unitOf(hass, totalEnt), mode.unit);
       const u = cfg.unit || (totalEnt ? unitOf(hass, totalEnt) : "") || unit;
-      tot.innerHTML = `${fmt(v)}<span class="u">${esc(u)}</span>`;
-      tot.title = totalEnt ? nameOf(hass, totalEnt) : "Sum of the rows";
+      tot.innerHTML = pendiente
+        ? `<span class="u">${esc(this._statsErr ? "no data" : "loading…")}</span>`
+        : `${fmt(v)}<span class="u">${esc(u)}</span>`;
+      tot.title = this._statsErr
+        ? this._statsErr
+        : totalEnt
+        ? nameOf(hass, totalEnt)
+        : "Sum of the rows";
     }
   }
 }
@@ -404,9 +627,9 @@ const SCHEMA = [
           select: {
             mode: "dropdown",
             options: [
-              { value: "active", label: "Active first" },
+              { value: "active", label: "Active first (idle rows keep my order)" },
               { value: "value", label: "By value (highest first)" },
-              { value: "config", label: "As configured" },
+              { value: "config", label: "My own order (as listed below)" },
               { value: "name", label: "By name" },
             ],
           },
@@ -441,6 +664,7 @@ const SCHEMA = [
     ],
   },
   { name: "total", selector: { entity: { filter: [{ domain: "sensor" }] } } },
+  { name: "billing_day", selector: { number: { min: 1, max: 28, step: 1, mode: "box" } } },
   {
     name: "entities",
     selector: { entity: { multiple: true, filter: [{ domain: "sensor" }] } },
@@ -456,6 +680,7 @@ const LABELS = {
   zero_threshold: "Off threshold",
   max: "Max scale (blank = automatic)",
   total: "Total meter (blank = sum the rows)",
+  billing_day: "Billing cycle starts on day",
   entities: "Entities",
 };
 
@@ -488,6 +713,52 @@ const GROUP_LABELS = {
   entities: "Group entities",
 };
 
+const MODE_SCHEMA = [
+  {
+    type: "grid",
+    schema: [
+      { name: "name", selector: { text: {} } },
+      {
+        name: "period",
+        selector: {
+          select: {
+            mode: "dropdown",
+            options: [
+              { value: "", label: "Live value" },
+              { value: "today", label: "Total since midnight" },
+              { value: "month", label: "Total this calendar month" },
+              { value: "billing", label: "Total this billing cycle" },
+            ],
+          },
+        },
+      },
+    ],
+  },
+  {
+    type: "grid",
+    schema: [
+      { name: "replace_from", selector: { text: {} } },
+      { name: "replace_to", selector: { text: {} } },
+    ],
+  },
+  {
+    type: "grid",
+    schema: [
+      { name: "unit", selector: { text: {} } },
+      { name: "max", selector: { text: {} } },
+    ],
+  },
+];
+
+const MODE_LABELS = {
+  name: "Button label",
+  period: "Reads",
+  replace_from: "Replace in entity id",
+  replace_to: "...with",
+  unit: "Unit override",
+  max: "Max scale (blank = automatic)",
+};
+
 const BTN =
   "padding:4px 10px;margin-right:6px;border:1px solid var(--divider-color);" +
   "border-radius:6px;background:var(--card-background-color);" +
@@ -503,6 +774,7 @@ class PowerBarsCardEditor extends HTMLElement {
     this._hass = hass;
     if (this._form) this._form.hass = hass;
     for (const f of this._gforms || []) f.hass = hass;
+    for (const f of this._mforms || []) f.hass = hass;
   }
 
   get _hasGroups() {
@@ -569,6 +841,74 @@ class PowerBarsCardEditor extends HTMLElement {
     this._render(true);
   }
 
+  /* --- modos --- */
+
+  _modeList() {
+    return Array.isArray(this._cfg.modes) ? this._cfg.modes.map((m) => ({ ...m })) : [];
+  }
+
+  _saveModes(modes, estructural) {
+    const cfg = { ...this._cfg };
+    if (modes.length) cfg.modes = modes;
+    else delete cfg.modes;
+    this._emit(cfg);
+    if (estructural) this._render(true);
+  }
+
+  // El primer modo se crea vacio a proposito: "Now" tiene que leer la entidad
+  // tal cual esta escrita, o al activar modos se romperia la tarjeta entera.
+  _addMode() {
+    const m = this._modeList();
+    if (!m.length) m.push({ name: "Now" });
+    m.push({ name: "Mode " + (m.length + 1) });
+    this._saveModes(m, true);
+  }
+
+  _delMode(i) {
+    const m = this._modeList();
+    m.splice(i, 1);
+    this._saveModes(m.length === 1 ? [] : m, true);
+  }
+
+  _moveMode(i, d) {
+    const m = this._modeList();
+    const j = i + d;
+    if (j < 0 || j >= m.length) return;
+    [m[i], m[j]] = [m[j], m[i]];
+    this._saveModes(m, true);
+  }
+
+  _modeToForm(m) {
+    const r = Array.isArray(m.replace) ? m.replace : ["", ""];
+    return {
+      name: m.name || "",
+      period: m.period || "",
+      replace_from: r[0] || "",
+      replace_to: r[1] || "",
+      unit: m.unit || "",
+      max: m.max === undefined || m.max === null ? "" : String(m.max),
+    };
+  }
+
+  _modeFromForm(v, prev) {
+    const out = {};
+    if (v.name) out.name = v.name;
+    if (v.period) out.period = v.period;
+    const f = (v.replace_from || "").trim();
+    const t = (v.replace_to || "").trim();
+    if (f) out.replace = [f, t];
+    if (v.unit) out.unit = v.unit;
+    if (v.max !== undefined && String(v.max).trim() !== "") {
+      const n = parseFloat(v.max);
+      if (Number.isFinite(n)) out.max = n;
+    }
+    // `key`, `severity`, `zero_threshold` y `total` del modo son solo YAML:
+    // se conservan tal cual al guardar desde la UI.
+    for (const k of ["key", "severity", "zero_threshold", "total"])
+      if (prev && prev[k] !== undefined) out[k] = prev[k];
+    return out;
+  }
+
   _groupToForm(g) {
     return {
       name: g.name || "",
@@ -610,6 +950,7 @@ class PowerBarsCardEditor extends HTMLElement {
       zero_threshold: c.zero_threshold === undefined ? 1 : c.zero_threshold,
       max: c.max === undefined || c.max === null ? "" : String(c.max),
       total: typeof c.total === "string" && c.total !== "sum" ? c.total : "",
+      billing_day: c.billing_day,
       entities: normEntries(c.entities).map((e) => e.entity),
     };
   }
@@ -629,6 +970,9 @@ class PowerBarsCardEditor extends HTMLElement {
     }
 
     if (typeof v.total === "string" && v.total.trim() !== "") out.total = v.total;
+    if (v.billing_day !== undefined && v.billing_day !== null && Number(v.billing_day) !== 1)
+      out.billing_day = Number(v.billing_day);
+    if (Array.isArray(this._cfg.modes) && this._cfg.modes.length) out.modes = this._cfg.modes;
 
     // Conserva name/max/color/severity por entidad al reordenar en el selector.
     const prev = {};
@@ -654,10 +998,14 @@ class PowerBarsCardEditor extends HTMLElement {
       this.innerHTML =
         `<ha-form id="main"></ha-form>` +
         `<div id="gwrap"></div>` +
-        `<div id="gbtns" style="margin-top:10px"></div>`;
+        `<div id="gbtns" style="margin-top:10px"></div>` +
+        `<div id="mwrap"></div>` +
+        `<div id="mbtns" style="margin-top:10px"></div>`;
       this._form = this.querySelector("#main");
       this._gwrap = this.querySelector("#gwrap");
       this._gbtns = this.querySelector("#gbtns");
+      this._mwrap = this.querySelector("#mwrap");
+      this._mbtns = this.querySelector("#mbtns");
       if (this._form) {
         this._form.computeLabel = (s) => LABELS[s.name] || s.name;
         this._form.addEventListener("value-changed", (ev) => {
@@ -677,12 +1025,59 @@ class PowerBarsCardEditor extends HTMLElement {
       if (this._hass) this._form.hass = this._hass;
     }
 
-    const sig = this._groups().length;
+    const sig = this._groups().length + ":" + this._modeList().length;
     if (rehacerGrupos || sig !== this._sig) {
       this._sig = sig;
       this._buildGroups();
+      this._buildModes();
     }
     this._buildButtons();
+  }
+
+  _buildModes() {
+    if (!this._mwrap) return;
+    this._mforms = [];
+    const modes = this._modeList();
+    this._mwrap.innerHTML = modes.length
+      ? `<div style="margin-top:16px;font-size:.8rem;font-weight:600;` +
+        `text-transform:uppercase;letter-spacing:.06em;color:var(--secondary-text-color)">Modes</div>` +
+        modes
+          .map(
+            (m, i) =>
+              `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--divider-color)">` +
+              `<div style="display:flex;align-items:center;margin-bottom:6px">` +
+              `<b style="flex:1;font-size:.85rem">${esc(m.name || "Mode " + (i + 1))}</b>` +
+              `<button id="mup${i}" style="${BTN}" title="Move up">&#9650;</button>` +
+              `<button id="mdn${i}" style="${BTN}" title="Move down">&#9660;</button>` +
+              `<button id="mrm${i}" style="${BTN}" title="Delete">&#10005;</button>` +
+              `</div><ha-form id="mf${i}"></ha-form></div>`
+          )
+          .join("")
+      : "";
+
+    modes.forEach((m, i) => {
+      const f = this._mwrap.querySelector("#mf" + i);
+      if (f) {
+        f.computeLabel = (x) => MODE_LABELS[x.name] || x.name;
+        f.schema = MODE_SCHEMA;
+        f.data = this._modeToForm(m);
+        if (this._hass) f.hass = this._hass;
+        f.addEventListener("value-changed", (ev) => {
+          ev.stopPropagation();
+          const ms = this._modeList();
+          ms[i] = this._modeFromForm(ev.detail.value, ms[i]);
+          this._saveModes(ms, false);
+        });
+        this._mforms.push(f);
+      }
+      const bind = (id, fn) => {
+        const b = this._mwrap.querySelector("#" + id + i);
+        if (b) b.onclick = fn;
+      };
+      bind("mup", () => this._moveMode(i, -1));
+      bind("mdn", () => this._moveMode(i, 1));
+      bind("mrm", () => this._delMode(i));
+    });
   }
 
   _buildGroups() {
@@ -739,6 +1134,18 @@ class PowerBarsCardEditor extends HTMLElement {
     if (add) add.onclick = () => this._addGroup();
     const conv = this._gbtns.querySelector("#conv");
     if (conv) conv.onclick = () => this._toGroups();
+
+    if (this._mbtns) {
+      this._mbtns.innerHTML =
+        `<button id="madd" style="${BTN}">+ Add mode</button>` +
+        (this._modeList().length
+          ? ""
+          : `<div style="font-size:.78rem;color:var(--secondary-text-color);margin-top:6px">` +
+            `Modes put buttons in the header to read the same rows a different ` +
+            `way — live watts, or kWh over a period.</div>`);
+      const ma = this._mbtns.querySelector("#madd");
+      if (ma) ma.onclick = () => this._addMode();
+    }
   }
 }
 
@@ -772,6 +1179,10 @@ if (typeof module !== "undefined" && module.exports) {
     normEntry,
     normEntries,
     normGroups,
+    normModes,
+    entityFor,
+    periodStart,
+    convert,
     numState,
     unitOf,
     nameOf,

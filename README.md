@@ -85,6 +85,8 @@ to touch YAML if you don't want to.
 | `max` | auto | Bar scale. Without it, the largest current value is used |
 | `severity` | `{yellow: 0.5, red: 0.8}` | Colour thresholds — see [Thresholds](#thresholds) |
 | `unit` | from entities | Override the displayed unit |
+| `modes` | — | Header buttons that re-read the rows — see [Modes](#modes--the-same-rows-read-a-different-way) |
+| `billing_day` | `1` | Day of month the billing cycle starts, for `period: billing` |
 | `name_width` | `8.5em` | Width of the name column |
 
 ### Per entity
@@ -99,6 +101,7 @@ entities:
     color: "#8e44ad"                      # fixed colour, ignores severity
     severity: {yellow: 1000, red: 1800}   # its own thresholds
     zero_threshold: 10                    # when this row greys out
+    energy: sensor.fryer_energy           # what a `key: energy` mode reads
 ```
 
 ## Groups
@@ -217,6 +220,72 @@ groups:
 > scale and therefore always red. For colours to mean anything, either set a
 > `max` or write `severity` in absolute values, which doesn't depend on scale.
 
+## Modes — the same rows, read a different way
+
+A mode puts a button in the header. Each mode resolves every row to a
+**different entity**, so the same card can show live watts or kWh over a period.
+
+```yaml
+type: custom:power-bars-card
+title: Consumption
+billing_day: 10                  # billing cycle starts on the 10th
+total: sensor.main_power
+modes:
+  - name: Now                    # no rule: reads the entity as written
+  - name: Month
+    period: billing              # sum over the current billing cycle
+    key: energy                  # each row's `energy:` key
+    unit: kWh
+    max: auto
+    total: sensor.main_energy
+entities:
+  - entity: sensor.fryer_power
+    energy: sensor.fryer_energy
+```
+
+### Where a mode gets its entity
+
+| Key | Behaviour |
+|---|---|
+| neither | Uses the row's own `entity` |
+| `key: energy` | Uses the row's `energy:` key |
+| `replace: ["_power", "_energy"]` | Derives it from the entity id |
+
+`key` wins over `replace`. **If a mode has a rule and a row doesn't satisfy it,
+the row shows as unavailable — it does not fall back to the base entity.**
+Falling back would quietly put watts in a kWh column, which is worse than a
+visible gap. The tooltip says which entity is missing.
+
+### Periods
+
+| `period` | Reads |
+|---|---|
+| *(unset)* | The entity's current state |
+| `today` | Total since midnight |
+| `month` | Total for the calendar month |
+| `billing` | Total since the last `billing_day` |
+
+A mode with a `period` doesn't read the entity's state. It sums long-term
+statistics over the window, the same source the Energy dashboard uses — so it
+works from day one, with no `utility_meter` per socket and no waiting for data
+to accumulate.
+
+`billing_day: 10` means the cycle runs from the 10th to the 10th. On the 5th of
+a month, the cycle in progress started on the 10th of the *previous* month.
+
+### A mode overrides everything
+
+`max`, `unit`, `severity` and `zero_threshold` set on a mode **beat the card,
+the group and the entity**. The quantity changed — a scale of 9900 W and a
+threshold of 5 W are meaningless once the column is in kWh.
+
+### Units are converted automatically
+
+If a mode declares `unit: kWh` and a row's entity reports `Wh`, the value is
+converted. Mixing them silently would show that row 1000× too large and it would
+look like the biggest consumer in the house. Handled for `W`/`kW` and
+`Wh`/`kWh`/`MWh`; anything else is left alone.
+
 ## Not just power
 
 Nothing in the card is electricity-specific. Any numeric sensor works — water
@@ -248,7 +317,7 @@ If one of those fits your case better, use it.
 node test/smoke.js
 ```
 
-235 assertions, no dependencies — there is a small DOM shim inside the test file
+337 assertions, no dependencies — there is a small DOM shim inside the test file
 itself. `_render()` and `_update()` are called for real and the resulting HTML
 is inspected, rather than simulated.
 
@@ -266,6 +335,12 @@ fail. Two findings from that exercise worth writing down:
   found they differ in 0.18% of cases, always with the same shape — an **active
   row with a low value**, which only exists because thresholds are per-entity.
   That case is test 38a.
+
+The same exercise on the mode/period work caught six more: falling back to the
+base entity when a rule doesn't match, a billing window that never steps back a
+month, a mode `max` that doesn't beat the group's, statistics that overwrite
+instead of summing, names taken from the energy sensor instead of the base one,
+and a first mode that isn't neutral.
 
 One known gap: computing the scale over visible rows instead of the whole group
 is **not caught by any test**. It is currently indistinguishable — `hide_zero`
