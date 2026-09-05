@@ -11,6 +11,8 @@ horizontal bars — in the space three gauges used to take.
 
 ---
 
+![The card in live mode](docs/power.png)
+
 ## Why this exists
 
 I had 24 power sensors on a dashboard as gauges, three per row. Eighteen of them
@@ -265,6 +267,14 @@ entities:
 the row shows as unavailable — it does not fall back to the base entity.**
 Falling back would quietly put watts in a kWh column, which is worse than a
 visible gap. The tooltip says which entity is missing.
+
+The same card, switched to the billing-cycle mode — same rows, same order,
+kWh instead of watts:
+
+![The card in billing-cycle mode](docs/mes.png)
+
+Two rows show `—` because those plugs have no energy sensor at all. That is
+deliberate: a visible gap beats quietly showing their wattage in a kWh column.
 
 ### Periods
 

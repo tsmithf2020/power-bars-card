@@ -5,6 +5,8 @@ ocupaban tres gauges.
 
 *[Read in English](README.md)*
 
+![La tarjeta en modo directo](docs/power.png)
+
 Nació de la vista **Datos Casa**: 24 gauges de potencia repartidos en 8 filas de
 3, de los cuales 18 marcaban 0 W en cualquier momento dado. Ocupaban ~1000 px de
 alto para no decir casi nada, y había que bajar la ventana para ver el final.
@@ -187,6 +189,14 @@ De dónde saca la entidad: `key` (escrita a mano en la fila) gana a
 y una fila no la cumple, esa fila sale como no disponible — no cae de vuelta a
 la entidad base.** Caer de vuelta metería watts en una columna de kWh sin que se
 note, que es peor que un hueco visible. El tooltip dice qué entidad falta.
+
+La misma tarjeta en el modo del ciclo de facturación — mismas filas, mismo
+orden, kWh en vez de watts:
+
+![La tarjeta en modo mes](docs/mes.png)
+
+Las dos filas con `—` son los enchufes que no tienen sensor de energía. Es a
+propósito: un hueco visible es mejor que colar sus watts en una columna de kWh.
 
 `period` puede ser `today`, `month` (mes calendario) o `billing` (desde el
 último `billing_day`). Un modo con `period` **no lee el estado**: suma
