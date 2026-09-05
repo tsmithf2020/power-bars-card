@@ -9,7 +9,7 @@
  * Local: /local/power-bars-card/power-bars-card.js
  */
 
-const VERSION = "1.5.0";
+const VERSION = "1.5.1";
 
 /* ---------- utilidades ---------- */
 
