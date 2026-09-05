@@ -270,7 +270,7 @@ o escribir la `severity` en watts, que no depende de la escala.
 node test/smoke.js
 ```
 
-381 comprobaciones, sin dependencias: hay un shim de DOM mínimo dentro del
+390 comprobaciones, sin dependencias: hay un shim de DOM mínimo dentro del
 propio test. A diferencia del otro card de la casa, aquí **se llama a
 `_render()` y `_update()` de verdad** y se revisa el HTML que producen, en vez
 de simular lo que harían.

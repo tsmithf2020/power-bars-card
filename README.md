@@ -337,7 +337,7 @@ If one of those fits your case better, use it.
 node test/smoke.js
 ```
 
-381 assertions, no dependencies — there is a small DOM shim inside the test file
+390 assertions, no dependencies — there is a small DOM shim inside the test file
 itself. `_render()` and `_update()` are called for real and the resulting HTML
 is inspected, rather than simulated.
 

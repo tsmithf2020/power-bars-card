@@ -9,7 +9,7 @@
  * Local: /local/power-bars-card/power-bars-card.js
  */
 
-const VERSION = "1.6.0";
+const VERSION = "1.7.0";
 
 /* ---------- utilidades ---------- */
 
@@ -202,6 +202,11 @@ function sevColor(value, max, sev) {
   return "var(--pbc-green)";
 }
 
+// Solo para leer el total desde _firma sin duplicar la logica de precedencia.
+function cfg2(card) {
+  return { _cfgTotal: card._cfg ? card._cfg.total : undefined };
+}
+
 function moreInfo(el, entityId) {
   el.dispatchEvent(
     new CustomEvent("hass-more-info", {
@@ -314,13 +319,13 @@ class PowerBarsCard extends HTMLElement {
       this._stats = out;
       this._statsAt = Date.now();
       this._statsFor = clave;
-      if (this._built) this._update();
+      if (this._built) this._update(true);
     } catch (e) {
       if (this._statsKey === clave) {
         this._stats = null;
         this._statsFor = clave;
         this._statsErr = String((e && e.message) || e);
-        if (this._built) this._update();
+        if (this._built) this._update(true);
       }
     }
   }
@@ -483,13 +488,43 @@ class PowerBarsCard extends HTMLElement {
     });
 
     this._built = true;
-    this._update();
+    this._ultimaFirma = null;
+    this._update(true);
   }
 
-  _update() {
+  /* Home Assistant llama a `set hass` en CADA cambio de estado de toda la
+     instalacion, no solo de lo que esta tarjeta muestra. Con inversores y
+     decenas de sensores de potencia eso son muchas llamadas por segundo, y
+     rehacer el HTML de cada grupo en todas ellas castiga al navegador. Esta
+     firma resume lo unico que el dibujo usa. */
+  _firma() {
+    const h = this._hass;
+    if (!h) return "";
+    const mode = this._modes[this._mi] || {};
+    const out = [this._mi, this._statsAt || 0];
+    const ver = (id) => {
+      if (!id) return;
+      const st = h.states[id];
+      if (!st) { out.push(id + "|-"); return; }
+      const a = st.attributes || {};
+      out.push(id + "|" + st.state + "|" + (a.unit_of_measurement || "") +
+               "|" + (a.friendly_name || ""));
+    };
+    for (const g of this._groups)
+      for (const e of g.entities) ver(entityFor(e, mode));
+    const t = mode.total !== undefined ? mode.total : cfg2(this)._cfgTotal;
+    ver(typeof t === "string" && t !== "sum" ? t : null);
+    return out.join(";");
+  }
+
+  _update(forzar) {
     const hass = this._hass;
     const cfg = this._cfg;
     if (!hass || !this.shadowRoot) return;
+
+    const firma = this._firma();
+    if (!forzar && firma === this._ultimaFirma) return;
+    this._ultimaFirma = firma;
 
     const hideZero = cfg.hide_zero === true;
     const sort = cfg.sort || "value";
