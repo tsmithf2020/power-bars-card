@@ -9,7 +9,7 @@
  * Local: /local/power-bars-card/power-bars-card.js
  */
 
-const VERSION = "1.5.1";
+const VERSION = "1.6.0";
 
 /* ---------- utilidades ---------- */
 
@@ -22,6 +22,19 @@ function normEntry(e) {
 
 // Si la entidad no lleva mas que el id, se guarda como string: el YAML queda
 // legible en vez de llenarse de `- entity: sensor.x`.
+// El campo de escala acepta un numero o la palabra `auto`. Los formularios
+// hacian parseFloat y tiraban lo que no fuera numero, asi que un `max: auto`
+// escrito en YAML se BORRABA en cuanto se tocaba cualquier otra cosa en la UI,
+// sin avisar. Los tres formularios pasan por aqui.
+function parseMax(v) {
+  if (v === undefined || v === null) return undefined;
+  const t = String(v).trim();
+  if (t === "") return undefined;
+  if (t.toLowerCase() === "auto") return "auto";
+  const n = parseFloat(t);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 function simplify(e) {
   return Object.keys(e).length === 1 && e.entity ? e.entity : e;
 }
@@ -713,7 +726,7 @@ const GROUP_SCHEMA = [
 
 const GROUP_LABELS = {
   name: "Group name",
-  max: "Max scale (blank = automatic)",
+  max: "Max scale (number, or `auto`)",
   zero_threshold: "Off threshold",
   in_total: "Include in total",
   entities: "Group entities",
@@ -762,7 +775,7 @@ const MODE_LABELS = {
   replace_from: "Replace in entity id",
   replace_to: "...with",
   unit: "Unit override",
-  max: "Max scale (blank = automatic)",
+  max: "Max scale (blank = keep group's, or `auto` to fit the largest)",
 };
 
 const BTN =
@@ -979,10 +992,8 @@ class PowerBarsCardEditor extends HTMLElement {
     const t = (v.replace_to || "").trim();
     if (f) out.replace = [f, t];
     if (v.unit) out.unit = v.unit;
-    if (v.max !== undefined && String(v.max).trim() !== "") {
-      const n = parseFloat(v.max);
-      if (Number.isFinite(n)) out.max = n;
-    }
+    const mx = parseMax(v.max);
+    if (mx !== undefined) out.max = mx;
     // `key`, `severity`, `zero_threshold` y `total` del modo son solo YAML:
     // se conservan tal cual al guardar desde la UI.
     for (const k of ["key", "severity", "zero_threshold", "total"])
@@ -1003,10 +1014,8 @@ class PowerBarsCardEditor extends HTMLElement {
   _groupFromForm(v, prev) {
     const out = {};
     if (v.name) out.name = v.name;
-    if (v.max !== undefined && String(v.max).trim() !== "") {
-      const n = parseFloat(v.max);
-      if (Number.isFinite(n)) out.max = n;
-    }
+    const mx = parseMax(v.max);
+    if (mx !== undefined) out.max = mx;
     if (v.zero_threshold !== undefined && v.zero_threshold !== null)
       out.zero_threshold = Number(v.zero_threshold);
     if (v.in_total === false) out.in_total = false;
@@ -1045,10 +1054,8 @@ class PowerBarsCardEditor extends HTMLElement {
     if (v.show_total === false) out.show_total = false;
     if (v.zero_threshold !== undefined && Number(v.zero_threshold) !== 1)
       out.zero_threshold = Number(v.zero_threshold);
-    if (v.max !== undefined && String(v.max).trim() !== "") {
-      const n = parseFloat(v.max);
-      if (Number.isFinite(n)) out.max = n;
-    }
+    const mx = parseMax(v.max);
+    if (mx !== undefined) out.max = mx;
 
     if (typeof v.total === "string" && v.total.trim() !== "") out.total = v.total;
     if (v.billing_day !== undefined && v.billing_day !== null && Number(v.billing_day) !== 1)
@@ -1276,6 +1283,7 @@ if (typeof module !== "undefined" && module.exports) {
     normEntry,
     normEntries,
     simplify,
+    parseMax,
     normGroups,
     normModes,
     entityFor,

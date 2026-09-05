@@ -221,6 +221,11 @@ groups:
         severity: {yellow: 1200, red: 2000} # row, in watts
 ```
 
+`max` accepts a number or the word `auto`. On a **mode**, blank means "keep
+whatever the group says" while `auto` means "fit the largest row" — which is
+usually what you want when the mode changes the quantity, because a scale in
+watts is meaningless in kWh.
+
 > **Note:** if `max` is automatic, the largest row is always at 100% of the
 > scale and therefore always red. For colours to mean anything, either set a
 > `max` or write `severity` in absolute values, which doesn't depend on scale.
@@ -322,7 +327,7 @@ If one of those fits your case better, use it.
 node test/smoke.js
 ```
 
-361 assertions, no dependencies — there is a small DOM shim inside the test file
+381 assertions, no dependencies — there is a small DOM shim inside the test file
 itself. `_render()` and `_update()` are called for real and the resulting HTML
 is inspected, rather than simulated.
 

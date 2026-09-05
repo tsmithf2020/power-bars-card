@@ -245,6 +245,11 @@ umbrales por defecto, amarillo empieza en 4950 W y rojo en 7920 W — casi lo
 mismo que los `severity: {yellow: 5000, red: 8000}` que tenían los gauges
 originales.
 
+**`max` acepta un número o la palabra `auto`.** En un *modo*, dejarlo en blanco
+significa "usa lo que diga el grupo" y `auto` significa "ajusta a la fila mayor".
+En un modo que cambia la magnitud casi siempre quieres `auto`: una escala en
+watts no dice nada en kWh.
+
 **Si `max` es automático, el mayor siempre queda rojo.** Es esperable: está al
 100% de la escala. Para que los colores signifiquen algo hay que fijar un `max`,
 o escribir la `severity` en watts, que no depende de la escala.
@@ -255,7 +260,7 @@ o escribir la `severity` en watts, que no depende de la escala.
 node test/smoke.js
 ```
 
-361 comprobaciones, sin dependencias: hay un shim de DOM mínimo dentro del
+381 comprobaciones, sin dependencias: hay un shim de DOM mínimo dentro del
 propio test. A diferencia del otro card de la casa, aquí **se llama a
 `_render()` y `_update()` de verdad** y se revisa el HTML que producen, en vez
 de simular lo que harían.
