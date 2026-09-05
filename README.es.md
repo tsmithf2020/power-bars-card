@@ -214,6 +214,9 @@ Todo se puede configurar sin tocar YAML, incluidos los grupos:
   sus entidades
 - **+ Add mode** hace lo mismo con los modos: nombre, período, regla de
   derivación, unidad y escala
+- Con `sort: config` o `sort: active` aparece una lista numerada con ▲▼ al lado
+  de cada entidad. El selector de HA no deja reordenar, así que sin esto habría
+  que borrar todo y volver a agregarlo en orden
 - Los nombres a mano y la `severity` puesta en YAML sobreviven a guardar desde
   la UI
 
@@ -252,7 +255,7 @@ o escribir la `severity` en watts, que no depende de la escala.
 node test/smoke.js
 ```
 
-337 comprobaciones, sin dependencias: hay un shim de DOM mínimo dentro del
+361 comprobaciones, sin dependencias: hay un shim de DOM mínimo dentro del
 propio test. A diferencia del otro card de la casa, aquí **se llama a
 `_render()` y `_update()` de verdad** y se revisa el HTML que producen, en vez
 de simular lo que harían.

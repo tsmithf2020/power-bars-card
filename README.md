@@ -66,8 +66,13 @@ entities:
   - sensor.kitchen_power
 ```
 
-There is a **visual editor**, including full group management — you never have
-to touch YAML if you don't want to.
+There is a **visual editor**, including group and mode management — you never
+have to touch YAML if you don't want to.
+
+Home Assistant's entity picker can't reorder what's already in it, so with
+`sort: config` or `sort: active` the editor adds ▲▼ next to each row. Moving one
+entity doesn't disturb the others, and you never have to clear the list and
+re-add everything in order.
 
 ## Options
 
@@ -317,7 +322,7 @@ If one of those fits your case better, use it.
 node test/smoke.js
 ```
 
-337 assertions, no dependencies — there is a small DOM shim inside the test file
+361 assertions, no dependencies — there is a small DOM shim inside the test file
 itself. `_render()` and `_update()` are called for real and the resulting HTML
 is inspected, rather than simulated.
 

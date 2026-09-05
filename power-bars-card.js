@@ -9,7 +9,7 @@
  * Local: /local/power-bars-card/power-bars-card.js
  */
 
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 
 /* ---------- utilidades ---------- */
 
@@ -18,6 +18,12 @@ function normEntry(e) {
   if (typeof e === "string") return { entity: e };
   if (e && typeof e === "object" && e.entity) return { ...e };
   return null;
+}
+
+// Si la entidad no lleva mas que el id, se guarda como string: el YAML queda
+// legible en vez de llenarse de `- entity: sensor.x`.
+function simplify(e) {
+  return Object.keys(e).length === 1 && e.entity ? e.entity : e;
 }
 
 function normEntries(list) {
@@ -841,6 +847,81 @@ class PowerBarsCardEditor extends HTMLElement {
     this._render(true);
   }
 
+  /* --- reordenar entidades --- */
+
+  // El selector de entidades de HA no deja reordenar: para cambiar el orden
+  // habria que borrarlas todas y volver a ponerlas. Estas flechas mueven una
+  // fila sin tocar el resto. Solo se muestran con `sort: config` o `active`,
+  // que son los unicos ordenes donde el orden escrito se nota.
+  get _ordenImporta() {
+    const s = this._cfg.sort || "value";
+    return s === "config" || s === "active";
+  }
+
+  _entListHtml(pref, ents) {
+    if (!this._ordenImporta || ents.length < 2) return "";
+    const st = this._hass && this._hass.states;
+    return (
+      `<div style="margin:2px 0 6px">` +
+      ents
+        .map((e, i) => {
+          const id = e.entity;
+          const fn = (st && st[id] && st[id].attributes.friendly_name) || "";
+          const txt = e.name || fn || id;
+          return (
+            `<div style="display:flex;align-items:center;gap:4px;padding:1px 0">` +
+            `<span style="width:1.6em;text-align:right;font-size:.72rem;` +
+            `color:var(--secondary-text-color)">${i + 1}.</span>` +
+            `<span title="${esc(id)}" style="flex:1;font-size:.8rem;overflow:hidden;` +
+            `text-overflow:ellipsis;white-space:nowrap">${esc(txt)}</span>` +
+            `<button id="${pref}u${i}" style="${BTN}"${i === 0 ? " disabled" : ""} ` +
+            `title="Move up">&#9650;</button>` +
+            `<button id="${pref}d${i}" style="${BTN}"${
+              i === ents.length - 1 ? " disabled" : ""
+            } title="Move down">&#9660;</button>` +
+            `</div>`
+          );
+        })
+        .join("") +
+      `</div>`
+    );
+  }
+
+  _bindEntList(root, pref, n, mover) {
+    for (let i = 0; i < n; i++) {
+      const u = root.querySelector("#" + pref + "u" + i);
+      const d = root.querySelector("#" + pref + "d" + i);
+      if (u) u.onclick = () => mover(i, -1);
+      if (d) d.onclick = () => mover(i, 1);
+    }
+  }
+
+  static _swap(list, i, d) {
+    const j = i + d;
+    if (j < 0 || j >= list.length) return null;
+    const out = list.slice();
+    [out[i], out[j]] = [out[j], out[i]];
+    return out;
+  }
+
+  _moveEntity(i, d) {
+    const ents = normEntries(this._cfg.entities);
+    const out = PowerBarsCardEditor._swap(ents, i, d);
+    if (!out) return;
+    const cfg = { ...this._cfg, entities: out.map(simplify) };
+    this._emit(cfg);
+    this._render(true);
+  }
+
+  _moveGroupEntity(gi, i, d) {
+    const gs = this._groups();
+    if (!gs[gi]) return;
+    const out = PowerBarsCardEditor._swap(normEntries(gs[gi].entities), i, d);
+    if (!out) return;
+    gs[gi] = { ...gs[gi], entities: out.map(simplify) };
+    this._saveGroups(gs, true);
+  }
+
   /* --- modos --- */
 
   _modeList() {
@@ -997,11 +1078,13 @@ class PowerBarsCardEditor extends HTMLElement {
     if (!this._built) {
       this.innerHTML =
         `<ha-form id="main"></ha-form>` +
+        `<div id="elist"></div>` +
         `<div id="gwrap"></div>` +
         `<div id="gbtns" style="margin-top:10px"></div>` +
         `<div id="mwrap"></div>` +
         `<div id="mbtns" style="margin-top:10px"></div>`;
       this._form = this.querySelector("#main");
+      this._elist = this.querySelector("#elist");
       this._gwrap = this.querySelector("#gwrap");
       this._gbtns = this.querySelector("#gbtns");
       this._mwrap = this.querySelector("#mwrap");
@@ -1023,6 +1106,12 @@ class PowerBarsCardEditor extends HTMLElement {
         : SCHEMA;
       this._form.data = this._toForm();
       if (this._hass) this._form.hass = this._hass;
+    }
+
+    if (this._elist) {
+      const ents = this._hasGroups ? [] : normEntries(this._cfg.entities);
+      this._elist.innerHTML = this._entListHtml("e", ents);
+      this._bindEntList(this._elist, "e", ents.length, (i, d) => this._moveEntity(i, d));
     }
 
     const sig = this._groups().length + ":" + this._modeList().length;
@@ -1093,7 +1182,7 @@ class PowerBarsCardEditor extends HTMLElement {
           `<button id="up${i}" style="${BTN}" title="Move up">&#9650;</button>` +
           `<button id="dn${i}" style="${BTN}" title="Move down">&#9660;</button>` +
           `<button id="rm${i}" style="${BTN}" title="Delete">&#10005;</button>` +
-          `</div><ha-form id="gf${i}"></ha-form></div>`
+          `</div><ha-form id="gf${i}"></ha-form><div id="gl${i}"></div></div>`
       )
       .join("");
 
@@ -1111,6 +1200,14 @@ class PowerBarsCardEditor extends HTMLElement {
           this._saveGroups(gs, false);
         });
         this._gforms.push(f);
+      }
+      const lista = this._gwrap.querySelector("#gl" + i);
+      if (lista) {
+        const ents = normEntries(g.entities);
+        lista.innerHTML = this._entListHtml("ge" + i + "_", ents);
+        this._bindEntList(lista, "ge" + i + "_", ents.length, (k, d) =>
+          this._moveGroupEntity(i, k, d)
+        );
       }
       const bind = (id, fn) => {
         const b = this._gwrap.querySelector("#" + id + i);
@@ -1178,6 +1275,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     normEntry,
     normEntries,
+    simplify,
     normGroups,
     normModes,
     entityFor,
