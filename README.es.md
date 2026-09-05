@@ -162,6 +162,47 @@ groups:
     entities: [sensor.fryer_power, sensor.micro_horno_power]
 ```
 
+## Modos — las mismas filas, leídas de otra forma
+
+Un modo pone un botón en la cabecera. Cada modo resuelve cada fila a **otra
+entidad**, así la misma tarjeta muestra watts ahora o kWh de un período.
+
+```yaml
+billing_day: 10                  # el ciclo de facturación empieza el 10
+modes:
+  - name: Ahora                  # sin regla: lee la entidad tal cual
+  - name: Mes 10-10
+    period: billing              # suma el ciclo de facturación vigente
+    key: energy                  # la clave `energy:` de cada fila
+    unit: kWh
+    max: auto
+    total: sensor.casa_ts_consumo_resumen_entregado
+entities:
+  - entity: sensor.fryer_power
+    energy: sensor.fryer_energy
+```
+
+De dónde saca la entidad: `key` (escrita a mano en la fila) gana a
+`replace: ["_power", "_energy"]` (derivada del nombre). **Si el modo tiene regla
+y una fila no la cumple, esa fila sale como no disponible — no cae de vuelta a
+la entidad base.** Caer de vuelta metería watts en una columna de kWh sin que se
+note, que es peor que un hueco visible. El tooltip dice qué entidad falta.
+
+`period` puede ser `today`, `month` (mes calendario) o `billing` (desde el
+último `billing_day`). Un modo con `period` **no lee el estado**: suma
+estadísticas de largo plazo sobre la ventana, la misma fuente que usa el panel
+de Energía. Por eso funciona desde el primer día, sin crear un `utility_meter`
+por enchufe ni esperar a que acumule.
+
+`max`, `unit`, `severity` y `zero_threshold` puestos en un modo **le ganan a la
+tarjeta, al grupo y a la entidad**: cambió la magnitud, y una escala de 9900 W
+no significa nada en kWh.
+
+**Las unidades se convierten solas.** Si el modo declara `kWh` y la entidad
+reporta `Wh`, se convierte. En esta casa hay dos enchufes así: Aire Ignacio
+marca 3375 Wh en el ciclo, y sin convertir aparecería como el mayor consumo de
+la casa, por encima del 1er Piso.
+
 ## Editor de UI
 
 Todo se puede configurar sin tocar YAML, incluidos los grupos:
@@ -171,6 +212,8 @@ Todo se puede configurar sin tocar YAML, incluidos los grupos:
 - **+ Add group**, y por grupo: subir ▲, bajar ▼, borrar ✕
 - Cada grupo edita nombre, escala máxima, umbral de apagado, "sumar al total" y
   sus entidades
+- **+ Add mode** hace lo mismo con los modos: nombre, período, regla de
+  derivación, unidad y escala
 - Los nombres a mano y la `severity` puesta en YAML sobreviven a guardar desde
   la UI
 
@@ -209,7 +252,7 @@ o escribir la `severity` en watts, que no depende de la escala.
 node test/smoke.js
 ```
 
-235 comprobaciones, sin dependencias: hay un shim de DOM mínimo dentro del
+337 comprobaciones, sin dependencias: hay un shim de DOM mínimo dentro del
 propio test. A diferencia del otro card de la casa, aquí **se llama a
 `_render()` y `_update()` de verdad** y se revisa el HTML que producen, en vez
 de simular lo que harían.
