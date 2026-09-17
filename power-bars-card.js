@@ -9,7 +9,7 @@
  * Local: /local/power-bars-card/power-bars-card.js
  */
 
-const VERSION = "2.1.0";
+const VERSION = "2.1.1";
 
 /* ---------- idioma ---------- */
 
@@ -369,14 +369,26 @@ function convert(v, de, a) {
   return (v * UNIDADES[de]) / UNIDADES[a];
 }
 
+// Crear un Intl.DateTimeFormat cuesta ~0,2 ms. Se llamaba en cada cambio de
+// estado de la casa (75 por segundo en una instalacion real: ~2% de un
+// nucleo). Se crea uno por zona y se reusa.
+const DTF_FECHA = new Map();
+const DTF_HORA = new Map();
+function dtfFor(cache, tz, opts) {
+  let f = cache.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", { timeZone: tz, ...opts });
+    cache.set(tz, f);
+  }
+  return f;
+}
+
 // Año, mes (0-11) y dia de un instante, en la zona horaria pedida. Sin zona,
 // la del navegador.
 function partsIn(d, tz) {
   if (tz) {
     try {
-      const f = new Intl.DateTimeFormat("en-US", {
-        timeZone: tz, year: "numeric", month: "numeric", day: "numeric",
-      });
+      const f = dtfFor(DTF_FECHA, tz, { year: "numeric", month: "numeric", day: "numeric" });
       const o = {};
       for (const x of f.formatToParts(d)) o[x.type] = Number(x.value);
       if (o.year && o.month && o.day) return { y: o.year, m: o.month - 1, day: o.day };
@@ -387,8 +399,8 @@ function partsIn(d, tz) {
 
 // Cuanto adelanta (ms) la zona `tz` a UTC en ese instante.
 function tzOffset(utcMs, tz) {
-  const f = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric",
+  const f = dtfFor(DTF_HORA, tz, {
+    hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric",
     hour: "numeric", minute: "numeric", second: "numeric",
   });
   const o = {};
@@ -601,6 +613,7 @@ class PowerBarsCard extends HTMLElement {
     this._cfg = { ...config };
     this._groups = groups;
     this._modes = modes;
+    this._planMemo = null;   // otras filas o modos: el plan se rehace
     if (this._mi === undefined || this._mi >= this._modes.length)
       this._mi = this._restoreMode();
     this._built = false;
@@ -644,7 +657,19 @@ class PowerBarsCard extends HTMLElement {
   _statsPlan() {
     const mode = this._modes[this._mi] || {};
     if (!mode.period || !this._hass) return null;
-    const start = periodStart(mode.period, this._cfg.billing_day, new Date(), haTimeZone(this._hass));
+    // El plan solo cambia con el modo, la zona horaria o el paso del tiempo
+    // (el inicio de la ventana). Se recalcula a lo mas una vez por minuto, no
+    // en cada cambio de estado. setConfig lo invalida.
+    const tz = haTimeZone(this._hass);
+    const sello = this._mi + "|" + (tz || "") + "|" + Math.floor(Date.now() / 60000);
+    if (this._planMemo && this._planMemo.sello === sello) return this._planMemo.plan;
+    const plan = this._armarPlan(mode, tz);
+    this._planMemo = { sello, plan };
+    return plan;
+  }
+
+  _armarPlan(mode, tz) {
+    const start = periodStart(mode.period, this._cfg.billing_day, new Date(), tz);
     if (!start) return null;
     const ids = new Set();
     for (const g of this._groups)
