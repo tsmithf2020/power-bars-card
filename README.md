@@ -113,6 +113,8 @@ others, and you never have to clear the list and re-add everything in order.
 | `modes` | — | Header buttons that re-read the rows — see [Modes](#modes--the-same-rows-read-a-different-way) |
 | `billing_day` | `1` | Day of month the billing cycle starts, for `period: billing` (1–31; in shorter months it falls on the last day) |
 | `name_width` | `8.5em` | Width of the name column, in `layout: inline` |
+| `decimals` | up to 1 | Fixed number of decimals (0–4). Also per group, per mode and per row — see [Numbers](#numbers) |
+| `text_size` | `100` | Size of text, values and bars, in %: `80` is smaller, `130` bigger (50–200). A slider in the editor |
 
 ### Per entity
 
@@ -126,6 +128,7 @@ entities:
     color: "#8e44ad"                      # fixed colour, ignores severity
     severity: {yellow: 1000, red: 1800}   # its own thresholds
     zero_threshold: 10                    # when this row greys out
+    decimals: 2                           # decimals for this row only
     energy: sensor.fryer_energy           # what a `key: energy` mode reads
 ```
 
@@ -358,9 +361,14 @@ anything else is left alone.
 ### Numbers
 
 Numbers use the number format of your Home Assistant profile (`3.157,5` or
-`3,157.5`), and an entity's display precision if you set one in its settings.
-Otherwise: whole numbers without decimals (`8`, not `8.0`), one decimal below 10,
-two below 0.1.
+`3,157.5`) and show **at most one decimal**: none from 10 up (`197`, not
+`197.4720`), one below 10 (`3.4`), none for whole numbers (`8`, not `8.0`).
+Energy sensors often ask for three or four decimals; in a list of bars that is
+noise, so an entity's display precision is only used when it asks for *fewer*.
+
+To fix the number of decimals, write `decimals` (0–4) on a row, a mode, a group
+or the card — the most specific one wins. The card-level field is also in the
+visual editor; leaving it blank goes back to "up to one".
 
 ## Layout and themes
 

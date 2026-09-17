@@ -118,6 +118,8 @@ las demás, y nunca tienes que vaciar la lista y volver a agregar todo en orden.
 | `modes` | — | Botones en la cabecera que leen las filas de otra forma — ver [Modos](#modos--las-mismas-filas-leídas-de-otra-forma) |
 | `billing_day` | `1` | Día del mes en que parte el ciclo de facturación, para `period: billing` (1–31; en los meses más cortos cae en el último día) |
 | `name_width` | `8.5em` | Ancho de la columna del nombre, en `layout: inline` |
+| `decimals` | hasta 1 | Cantidad fija de decimales (0–4). También por grupo, por modo y por fila — ver [Números](#números) |
+| `text_size` | `100` | Tamaño de textos, valores y barras, en %: `80` más chico, `130` más grande (50–200). En el editor es una barra deslizante |
 
 ### Por entidad
 
@@ -131,6 +133,7 @@ entities:
     color: "#8e44ad"                      # color fijo, ignora severity
     severity: {yellow: 1000, red: 1800}   # sus propios umbrales
     zero_threshold: 10                    # cuándo esta fila se pinta gris
+    decimals: 2                           # decimales solo para esta fila
     energy: sensor.fryer_energy           # lo que lee un modo con `key: energy`
 ```
 
@@ -377,8 +380,14 @@ Funciona con `W`/`kW` y `Wh`/`kWh`/`MWh`; cualquier otra unidad queda tal cual.
 ### Números
 
 Los números usan el formato de tu perfil de Home Assistant (`3.157,5` o
-`3,157.5`) y la precisión de la entidad, si le pusiste una en su configuración.
-Si no: enteros sin decimales (`8`, no `8,0`), un decimal bajo 10 y dos bajo 0,1.
+`3,157.5`) y llevan **a lo más un decimal**: ninguno desde 10 (`197`, no
+`197,4720`), uno bajo 10 (`3,4`) y ninguno en los enteros (`8`, no `8,0`). Los
+sensores de energía suelen pedir tres o cuatro decimales; en una lista de barras
+eso es ruido, así que la precisión de la entidad solo se usa si pide *menos*.
+
+Para fijar los decimales, escribe `decimals` (0–4) en una fila, un modo, un grupo
+o la tarjeta; gana el más específico. El de la tarjeta también está en el editor
+visual; si lo dejas vacío, vuelve a "hasta uno".
 
 ## Diseño y temas
 

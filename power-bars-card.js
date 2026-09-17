@@ -9,7 +9,7 @@
  * Local: /local/power-bars-card/power-bars-card.js
  */
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
 
 /* ---------- idioma ---------- */
 
@@ -38,6 +38,8 @@ const I18N = {
     max: "Max scale (blank = automatic)",
     total: "Total meter (blank = sum the rows)",
     billing_day: "Billing cycle starts on day",
+    decimals: "Decimals (blank = up to 1)",
+    text_size: "Text size",
     entities: "Entities",
     sortActive: "Active first (idle rows keep my order)",
     sortValue: "By value (highest first)",
@@ -95,6 +97,8 @@ const I18N = {
     max: "Escala máxima (vacío = automática)",
     total: "Medidor del total (vacío = suma de las filas)",
     billing_day: "El ciclo de facturación parte el día",
+    decimals: "Decimales (vacío = hasta 1)",
+    text_size: "Tamaño del texto",
     entities: "Entidades",
     sortActive: "Encendidas primero (las apagadas quedan en mi orden)",
     sortValue: "Por valor (mayor primero)",
@@ -190,6 +194,7 @@ function normGroups(cfg) {
         in_total: g.in_total,   // sin esto el grupo excluido igual sumaba
         severity: g.severity,
         zero_threshold: g.zero_threshold,
+        decimals: g.decimals,
         entities: ents,
       });
     }
@@ -217,18 +222,35 @@ function nameOf(hass, id, override) {
   return (st && st.attributes && st.attributes.friendly_name) || id;
 }
 
-// Cuantos decimales lleva un numero. Si la entidad trae `display_precision`
-// (lo que se elige en HA, en la ventana de la entidad), manda esa. Si no:
-//   entero o >= 10 -> ninguno   ("8", no "8.0"; "173", "14")
-//   >= 0,1         -> uno       ("3.4", "0.2")
-//   menor          -> dos       ("0.04", no "0.0")
-function decimalsFor(v, precision) {
-  if (Number.isInteger(precision) && precision >= 0 && precision <= 6) return precision;
+// Cuantos decimales lleva un numero.
+//   `decimals` escrito en la config (fila, modo, grupo o tarjeta): manda.
+//   Si no, a lo mas UNO: entero o >= 10 -> ninguno ("8", "173", "378"), y
+//   bajo 10 -> uno ("3.4", "0.2"). Un sensor de energia suele pedir 3 o 4
+//   decimales (`display_precision`), y "197,4720 kWh" no le sirve a nadie en
+//   una lista de barras: esa precision solo se usa si pide MENOS.
+function decimalsFor(v, precision, decimals) {
+  if (Number.isInteger(decimals) && decimals >= 0 && decimals <= 4) return decimals;
   const a = Math.abs(v);
-  if (a === 0 || Number.isInteger(v) || a >= 10) return 0;
+  let d;
+  if (a === 0 || Number.isInteger(v) || a >= 10) d = 0;
   // 9,96 redondeado a un decimal es "10.0": sin decimales, igual que un 10.
-  if (a >= 0.1) return Math.abs(Number(v.toFixed(1))) >= 10 ? 0 : 1;
-  return 2;
+  else d = Math.abs(Number(v.toFixed(1))) >= 10 ? 0 : 1;
+  if (Number.isInteger(precision) && precision >= 0) d = Math.min(d, precision);
+  return d;
+}
+
+// `decimals` de la config: numero entero 0-4, o nada.
+function parseDecimals(x) {
+  if (x === undefined || x === null || x === "") return undefined;
+  const n = Number(x);
+  return Number.isInteger(n) && n >= 0 && n <= 4 ? n : undefined;
+}
+
+// `text_size` en porcentaje (100 = normal), acotado a 50-200.
+function textScale(x) {
+  const n = Number(x);
+  if (x === undefined || x === null || x === "" || !Number.isFinite(n) || n <= 0) return 1;
+  return Math.min(200, Math.max(50, n)) / 100;
 }
 
 // 1578 -> "1578", 0.209 -> "0.2", 8 -> "8". Con `opt.locale` usa el formato
@@ -236,7 +258,7 @@ function decimalsFor(v, precision) {
 function fmt(v, opt) {
   if (v === null || v === undefined || !Number.isFinite(v)) return "—";
   const o = opt || {};
-  const d = decimalsFor(v, o.precision);
+  const d = decimalsFor(v, o.precision, o.decimals);
   let n = Number(v.toFixed(d));
   if (Object.is(n, -0)) n = 0;          // "-0.0" no existe
   if (!o.locale) return n.toFixed(d);
@@ -769,8 +791,14 @@ class PowerBarsCard extends HTMLElement {
         --pbc-red: var(--error-color, #f44336);
         --pbc-bar: var(--primary-color, #03a9f4);
         --pbc-track: var(--divider-color, rgba(0, 0, 0, .12));
+        --pbc-scale: 1;
       }
-      ha-card { padding: 12px 14px 12px; container-type: inline-size; }
+      /* text_size escala todo lo escrito y el grosor de las barras: la letra
+         base va en la tarjeta y lo de adentro en em de ella. */
+      ha-card {
+        padding: 12px 14px 12px; container-type: inline-size;
+        font-size: calc(1rem * var(--pbc-scale));
+      }
 
       /* Cabecera: titulo, botones de modo y total. Sin titulo no queda un
          hueco a la izquierda de los botones. */
@@ -778,15 +806,15 @@ class PowerBarsCard extends HTMLElement {
         display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
         margin: 0 0 8px; min-height: 28px;
       }
-      .title { font-size: 1.15rem; font-weight: 500; color: var(--primary-text-color); }
+      .title { font-size: 1.15em; font-weight: 500; color: var(--primary-text-color); }
       .total {
-        margin-left: auto; font-size: 1.05rem; font-weight: 500; white-space: nowrap;
+        margin-left: auto; font-size: 1.05em; font-weight: 500; white-space: nowrap;
         color: var(--primary-text-color); font-variant-numeric: tabular-nums;
       }
       .u { font-size: .8em; font-weight: 400; color: var(--secondary-text-color); margin-left: .2em; }
       .modes { display: flex; flex-wrap: wrap; gap: 6px; }
       .modes button {
-        font: inherit; font-size: .8rem; line-height: 1.2; min-height: 28px;
+        font: inherit; font-size: .8em; line-height: 1.2; min-height: 28px;
         padding: 4px 12px; cursor: pointer; border-radius: 999px;
         border: 1px solid var(--divider-color); background: transparent;
         color: var(--primary-text-color);
@@ -799,7 +827,7 @@ class PowerBarsCard extends HTMLElement {
       .modes button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
 
       .grp {
-        font-size: .74rem; font-weight: 600; letter-spacing: .07em;
+        font-size: .74em; font-weight: 600; letter-spacing: .07em;
         text-transform: uppercase; color: var(--secondary-text-color);
         margin: 12px 0 4px; padding-bottom: 3px;
         border-bottom: 1px solid var(--divider-color);
@@ -816,11 +844,11 @@ class PowerBarsCard extends HTMLElement {
       .row:hover { background: var(--secondary-background-color); }
       .row:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 1px; }
       .nm {
-        grid-area: nm; min-width: 0; font-size: .84rem; color: var(--primary-text-color);
+        grid-area: nm; min-width: 0; font-size: .84em; color: var(--primary-text-color);
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
       .val {
-        grid-area: val; font-size: .84rem; font-weight: 500; white-space: nowrap;
+        grid-area: val; font-size: .84em; font-weight: 500; white-space: nowrap;
         font-variant-numeric: tabular-nums; color: var(--primary-text-color); text-align: right;
       }
       .track {
@@ -842,17 +870,17 @@ class PowerBarsCard extends HTMLElement {
         grid-template-areas: "nm val" "bar bar";
         row-gap: 3px; padding-top: 4px; padding-bottom: 5px;
       }
-      .wrap.stacked .track { height: 5px; border-radius: 3px; }
+      .wrap.stacked .track { height: calc(5px * var(--pbc-scale)); border-radius: 3px; }
 
       /* En linea: nombre, barra y valor en una fila, como antes de 2.0. */
       .wrap.inline .row {
         grid-template-columns: var(--pbc-name-w, 8.5em) minmax(0, 1fr) auto;
         grid-template-areas: "nm bar val"; min-height: 22px;
       }
-      .wrap.inline .track { height: 8px; border-radius: 4px; }
+      .wrap.inline .track { height: calc(8px * var(--pbc-scale)); border-radius: 4px; }
       /* Mismas medidas que en 1.x. El ancho del nombre va en em de la fila,
          asi que la letra se fija en la fila y no solo en el texto. */
-      .wrap.inline .row { font-size: .82rem; }
+      .wrap.inline .row { font-size: .82em; }
       .wrap.inline .nm, .wrap.inline .val { font-size: 1em; }
       .wrap.inline .val { min-width: 3.2em; }
 
@@ -866,7 +894,7 @@ class PowerBarsCard extends HTMLElement {
       .row.wait .val { color: var(--secondary-text-color); font-weight: 400; }
 
       .empty {
-        font-size: .82rem; color: var(--secondary-text-color);
+        font-size: .82em; color: var(--secondary-text-color);
         padding: 6px 4px; font-style: italic;
       }
 
@@ -877,7 +905,7 @@ class PowerBarsCard extends HTMLElement {
       @container (max-width: 400px) {
         .wrap.two.inline { grid-template-columns: 1fr; column-gap: 0; }
         .wrap.inline .row { grid-template-columns: var(--pbc-name-w-s, 7.5em) minmax(0, 1fr) auto; }
-        .wrap.inline .nm, .wrap.inline .val { font-size: .78rem; }
+        .wrap.inline .row { font-size: .78em; }
       }
       @media (prefers-reduced-motion: reduce) {
         .fill { transition: none; }
@@ -932,6 +960,9 @@ class PowerBarsCard extends HTMLElement {
       if (cfg.name_width) hostStyle.setProperty(v, cfg.name_width);
       else if (hostStyle.removeProperty) hostStyle.removeProperty(v);
     }
+    const escala = textScale(cfg.text_size);
+    if (escala !== 1) hostStyle.setProperty("--pbc-scale", String(escala));
+    else if (hostStyle.removeProperty) hostStyle.removeProperty("--pbc-scale");
 
     this._modes.forEach((m, i) => {
       const b = this.shadowRoot.getElementById("m" + i);
@@ -1053,6 +1084,9 @@ class PowerBarsCard extends HTMLElement {
           // La precision elegida en HA vale para la unidad de la entidad; si se
           // convirtio a otra, se vuelve a la regla por magnitud.
           precision: u === uOrig ? precisionOf(hass, id) : undefined,
+          // Decimales escritos: la fila, luego el modo, el grupo y la tarjeta.
+          decimals: [e.decimals, mode.decimals, g.decimals, cfg.decimals]
+            .map(parseDecimals).find((d) => d !== undefined),
           existe: !!(id && hass.states && hass.states[id]),
         };
       });
@@ -1108,7 +1142,7 @@ class PowerBarsCard extends HTMLElement {
           const u = sinDato ? "" : it.unit || unit;
           const texto = pendiente
             ? "…"
-            : fmt(it.v, { locale: nf.locale, grouping: nf.grouping, precision: it.precision });
+            : fmt(it.v, { locale: nf.locale, grouping: nf.grouping, precision: it.precision, decimals: it.decimals });
           // Dos formas de no tener dato en este modo, y conviene distinguirlas:
           // no se pudo derivar ninguna entidad, o se derivo una que no existe.
           // La segunda es la habitual (el enchufe no lleva sensor de energia)
@@ -1169,7 +1203,9 @@ class PowerBarsCard extends HTMLElement {
         ? `<span class="u">${esc(T.loading)}</span>`
         : err && !stats.data
         ? `<span class="u">${esc(T.noData)}</span>`
-        : `${esc(fmt(v, { locale: nf.locale, grouping: nf.grouping, precision: prec }))}<span class="u">${esc(u)}</span>`;
+        : `${esc(fmt(v, { locale: nf.locale, grouping: nf.grouping, precision: prec,
+            decimals: [mode.decimals, cfg.decimals].map(parseDecimals).find((d) => d !== undefined) }))}` +
+          `<span class="u">${esc(u)}</span>`;
       tot.title = err ? err : totalEnt ? nameOf(hass, totalEnt) : T.sumOfRows;
     }
   }
@@ -1244,6 +1280,13 @@ function cardSchema(T) {
       schema: [
         { name: "zero_threshold", selector: { number: { min: 0, max: 100, step: 0.5, mode: "box" } } },
         { name: "max", selector: { text: {} } },
+      ],
+    },
+    {
+      type: "grid",
+      schema: [
+        { name: "decimals", selector: { number: { min: 0, max: 4, step: 1, mode: "box" } } },
+        { name: "text_size", selector: { number: { min: 50, max: 200, step: 10, mode: "slider", unit_of_measurement: "%" } } },
       ],
     },
     { name: "total", selector: { entity: { filter: [{ domain: "sensor" }] } } },
@@ -1722,6 +1765,8 @@ class PowerBarsCardEditor extends HTMLElement {
       max: c.max === undefined || c.max === null ? "" : String(c.max),
       total: typeof c.total === "string" && c.total !== "sum" ? c.total : "",
       billing_day: c.billing_day,
+      decimals: parseDecimals(c.decimals),
+      text_size: Math.round(textScale(c.text_size) * 100),
       entities: normEntries(c.entities).map((e) => e.entity),
     };
   }
@@ -1732,7 +1777,7 @@ class PowerBarsCardEditor extends HTMLElement {
     // `unit`, `name_width`, `card_mod` o el `grid_options`/`visibility` que
     // pone la propia vista de secciones.
     const out = { ...this._cfg, type: this._cfg.type || "custom:power-bars-card" };
-    for (const k of ["title", "sort", "layout", "columns", "hide_zero", "show_total", "zero_threshold",
+    for (const k of ["title", "sort", "layout", "columns", "hide_zero", "show_total", "zero_threshold", "decimals", "text_size",
                      "max", "total", "billing_day"])
       delete out[k];
     if (v.title) out.title = v.title;
@@ -1752,6 +1797,17 @@ class PowerBarsCardEditor extends HTMLElement {
     if (typeof v.total === "string" && v.total.trim() !== "") out.total = v.total;
     if (v.billing_day !== undefined && v.billing_day !== null && Number(v.billing_day) !== 1)
       out.billing_day = Number(v.billing_day);
+    const dec = parseDecimals(v.decimals);
+    if (dec !== undefined) out.decimals = dec;
+    // 100% es el tamaño normal y no se escribe. Si el formulario no trae el
+    // campo, se deja lo que habia.
+    if ("text_size" in v) {
+      const ts = Math.round(textScale(v.text_size) * 100);
+      if (ts !== 100) out.text_size = ts;
+    } else if (this._cfg.text_size !== undefined) {
+      out.text_size = this._cfg.text_size;
+    }
+    if (!("decimals" in v) && this._cfg.decimals !== undefined) out.decimals = this._cfg.decimals;
     if (Array.isArray(this._cfg.modes) && this._cfg.modes.length) out.modes = this._cfg.modes;
     else delete out.modes;
 
