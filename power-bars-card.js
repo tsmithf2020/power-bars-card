@@ -11,6 +11,135 @@
 
 const VERSION = "1.8.0";
 
+/* ---------- idioma ---------- */
+
+// Textos de la tarjeta y del editor. Español para cualquier `es*` del perfil de
+// Home Assistant, ingles para todo lo demas.
+const I18N = {
+  en: {
+    nothingOn: "nothing on",
+    loading: "loading…",
+    noData: "no data",
+    sumOfRows: "Sum of the rows",
+    mode: "Mode",
+    noEntityForMode: "no entity for this mode",
+    notFound: "not found",
+    stubTitle: "Power",
+    now: "Now",
+    group: "Group",
+    // editor
+    title: "Title",
+    sort: "Sort order",
+    columns: "Columns",
+    layout: "Row layout",
+    hide_zero: "Hide rows that are off",
+    show_total: "Show total in the header",
+    zero_threshold: "Off threshold",
+    max: "Max scale (blank = automatic)",
+    total: "Total meter (blank = sum the rows)",
+    billing_day: "Billing cycle starts on day",
+    entities: "Entities",
+    sortActive: "Active first (idle rows keep my order)",
+    sortValue: "By value (highest first)",
+    sortConfig: "My own order (as listed below)",
+    sortName: "By name",
+    col1: "1 column",
+    col2: "2 columns",
+    layoutStacked: "Name and value on top, bar below",
+    layoutInline: "Name, bar and value on one line",
+    groupName: "Group name",
+    groupMax: "Max scale (number, or `auto`)",
+    inTotal: "Include in total",
+    groupEntities: "Group entities",
+    modeName: "Button label",
+    period: "Reads",
+    periodLive: "Live value",
+    periodToday: "Total since midnight",
+    periodMonth: "Total this calendar month",
+    periodBilling: "Total this billing cycle",
+    replaceFrom: "Replace in entity id",
+    replaceTo: "...with",
+    unit: "Unit override",
+    modeMax: "Max scale (blank = keep group's, or `auto` to fit the largest)",
+    modeTotal: "Total meter for this mode (blank = sum the rows)",
+    modeThreshold: "Off threshold in this mode (blank = 0)",
+    modes: "Modes",
+    moveUp: "Move up",
+    moveDown: "Move down",
+    remove: "Delete",
+    addGroup: "+ Add group",
+    useGroups: "Use groups",
+    useGroupsHelp: "Groups get their own heading and their own scale. The entities you already have move into the first group.",
+    addMode: "+ Add mode",
+    addModeHelp: "Modes put buttons in the header to read the same rows a different way — live watts, or kWh over a period.",
+  },
+  es: {
+    nothingOn: "nada encendido",
+    loading: "cargando…",
+    noData: "sin datos",
+    sumOfRows: "Suma de las filas",
+    mode: "Modo",
+    noEntityForMode: "sin entidad para este modo",
+    notFound: "no existe",
+    stubTitle: "Consumos",
+    now: "Ahora",
+    group: "Grupo",
+    title: "Título",
+    sort: "Orden",
+    columns: "Columnas",
+    layout: "Diseño de las filas",
+    hide_zero: "Esconder las filas apagadas",
+    show_total: "Mostrar el total en la cabecera",
+    zero_threshold: "Umbral de apagado",
+    max: "Escala máxima (vacío = automática)",
+    total: "Medidor del total (vacío = suma de las filas)",
+    billing_day: "El ciclo de facturación parte el día",
+    entities: "Entidades",
+    sortActive: "Encendidas primero (las apagadas quedan en mi orden)",
+    sortValue: "Por valor (mayor primero)",
+    sortConfig: "Mi propio orden (el de la lista)",
+    sortName: "Por nombre",
+    col1: "1 columna",
+    col2: "2 columnas",
+    layoutStacked: "Nombre y valor arriba, barra abajo",
+    layoutInline: "Nombre, barra y valor en una línea",
+    groupName: "Nombre del grupo",
+    groupMax: "Escala máxima (número, o `auto`)",
+    inTotal: "Sumar en el total",
+    groupEntities: "Entidades del grupo",
+    modeName: "Texto del botón",
+    period: "Lee",
+    periodLive: "Valor en vivo",
+    periodToday: "Total desde medianoche",
+    periodMonth: "Total del mes calendario",
+    periodBilling: "Total del ciclo de facturación",
+    replaceFrom: "Reemplazar en el entity id",
+    replaceTo: "...por",
+    unit: "Unidad a mostrar",
+    modeMax: "Escala máxima (vacío = la del grupo, o `auto` para ajustar a la mayor)",
+    modeTotal: "Medidor del total en este modo (vacío = suma de las filas)",
+    modeThreshold: "Umbral de apagado en este modo (vacío = 0)",
+    modes: "Modos",
+    moveUp: "Subir",
+    moveDown: "Bajar",
+    remove: "Borrar",
+    addGroup: "+ Agregar grupo",
+    useGroups: "Usar grupos",
+    useGroupsHelp: "Cada grupo tiene su propio título y su propia escala. Las entidades que ya tienes pasan al primer grupo.",
+    addMode: "+ Agregar modo",
+    addModeHelp: "Los modos ponen botones en la cabecera para leer las mismas filas de otra forma: watts en vivo, o kWh de un período.",
+  },
+};
+
+function langOf(hass) {
+  const l = String((hass && ((hass.locale && hass.locale.language) || hass.language)) || "en");
+  return l.toLowerCase().startsWith("es") ? "es" : "en";
+}
+
+function txt(hass) {
+  return I18N[langOf(hass)];
+}
+
 /* ---------- utilidades ---------- */
 
 // Acepta "sensor.x" o {entity: "sensor.x", name: "...", max: 500}
@@ -240,6 +369,11 @@ function midnight(y, m, day, tz) {
       const base = Date.UTC(y, m, day);
       let t = base - tzOffset(base, tz);
       t = base - tzOffset(t, tz);
+      // Donde el cambio de hora es justo a medianoche (Chile: 23:59:59 salta
+      // a 01:00) las 00:00 no existen y el calculo cae en las 23:00 del dia
+      // anterior. En ese caso el dia empieza con su primer instante valido.
+      const p = partsIn(new Date(t), tz);
+      if (p.y !== y || p.m !== m || p.day !== day) t += 3600000;
       return new Date(t);
     } catch (e) {}
   }
@@ -389,6 +523,7 @@ function moreInfo(el, entityId) {
 const STATS_TTL = 5 * 60 * 1000;          // se vuelven a pedir cada 5 minutos
 const STATS_RETRY_BASE = 15 * 1000;       // tras un error: 15 s, 30 s, 60 s...
 const STATS_RETRY_MAX = 10 * 60 * 1000;   // ...hasta 10 minutos
+const STATS_CACHE_MAX_AGE = 60 * 60 * 1000;
 
 class PowerBarsCard extends HTMLElement {
   constructor() {
@@ -492,9 +627,14 @@ class PowerBarsCard extends HTMLElement {
   // desde las estadisticas, igual que el panel de Energia. Asi funciona sin
   // crear un utility_meter por enchufe.
   //
-  // Dos consultas: los dias/horas cerrados salen de la tabla de largo plazo
-  // (por hora), y la hora en curso de la de 5 minutos. Con solo la primera los
-  // valores iban hasta una hora atrasados.
+  // Dos consultas: las horas cerradas salen de la tabla de largo plazo, y lo
+  // mas reciente de la de 5 minutos. Con solo la primera los valores iban
+  // hasta una hora atrasados.
+  //
+  // El corte va UNA hora antes de la hora en curso: HA escribe la estadistica
+  // horaria unos segundos despues de que la hora termina, y con el corte justo
+  // en la hora en punto, en esos primeros minutos la hora recien cerrada no
+  // estaba en ninguna de las dos consultas.
   async _fetchStats(plan) {
     const hass = this._hass;
     const key = plan.key;
@@ -502,7 +642,7 @@ class PowerBarsCard extends HTMLElement {
     const prev = this._cache[key];
     try {
       const ahora = Date.now();
-      const hora = new Date(Math.floor(ahora / 3600000) * 3600000);
+      const hora = new Date(Math.floor(ahora / 3600000) * 3600000 - 3600000);
       const corte = hora > plan.start ? hora : plan.start;
       const pedir = (desde, hasta, period) =>
         hass.callWS({
@@ -531,6 +671,11 @@ class PowerBarsCard extends HTMLElement {
           }
         }
       this._cache[key] = { data, at: Date.now(), err: null, fails: 0 };
+      // Un tablero abierto por meses juntaria una entrada por dia o por ciclo:
+      // se bota lo que no se ha tocado en una hora.
+      for (const [k, c] of Object.entries(this._cache))
+        if (k !== key && !this._inflight[k] && Date.now() - (c.at || 0) > STATS_CACHE_MAX_AGE)
+          delete this._cache[k];
     } catch (e) {
       // Se conserva lo ultimo bueno, y se reintenta con espera creciente: antes
       // un error hacia pedir de nuevo en CADA cambio de estado de la casa.
@@ -676,7 +821,7 @@ class PowerBarsCard extends HTMLElement {
       /* Segun el ancho de la TARJETA, no de la pantalla: en la vista de
          secciones una tarjeta angosta en un escritorio seguia a 2 columnas y
          la barra quedaba en 0 px. */
-      @container (max-width: 460px) {
+      @container (max-width: 400px) {
         .wrap.two { grid-template-columns: 1fr; column-gap: 0; }
         .row { grid-template-columns: var(--pbc-name-w-s, 7.5em) 1fr auto; }
         .nm, .val { font-size: .78rem; }
@@ -1416,7 +1561,10 @@ class PowerBarsCardEditor extends HTMLElement {
     if (String(v.columns) === "2") out.columns = 2;
     if (v.hide_zero) out.hide_zero = true;
     if (v.show_total === false) out.show_total = false;
-    if (v.zero_threshold !== undefined && Number(v.zero_threshold) !== 1)
+    // Vaciar el campo es volver al valor por defecto, no poner 0: Number("")
+    // es 0, y un umbral 0 dejaba toda fila distinta de cero como encendida.
+    if (v.zero_threshold !== undefined && v.zero_threshold !== null && v.zero_threshold !== "" &&
+        Number.isFinite(Number(v.zero_threshold)) && Number(v.zero_threshold) !== 1)
       out.zero_threshold = Number(v.zero_threshold);
     const mx = parseMax(v.max);
     if (mx !== undefined) out.max = mx;
@@ -1502,22 +1650,33 @@ class PowerBarsCardEditor extends HTMLElement {
   // con lo que habia al construirlos: si el YAML cambiaba por fuera, guardar
   // desde el formulario viejo borraba lo nuevo, y las flechas de reordenar
   // apuntaban a filas que ya no estaban.
+  // Solo se toca lo que cambio: reasignar `data` identica o rehacer la lista
+  // en cada tecla podia mover el cursor del campo que se esta escribiendo.
   _refreshSubforms() {
+    const poner = (f, data) => {
+      const j = JSON.stringify(data);
+      if (f._pbcData === j) return;
+      f._pbcData = j;
+      f.data = data;
+    };
     const groups = this._groups();
     (this._gforms || []).forEach((f, i) => {
-      if (groups[i]) f.data = this._groupToForm(groups[i]);
+      if (groups[i]) poner(f, this._groupToForm(groups[i]));
     });
     if (this._gwrap)
       groups.forEach((g, i) => {
         const lista = this._gwrap.querySelector("#gl" + i);
         if (!lista) return;
         const ents = normEntries(g.entities);
-        lista.innerHTML = this._entListHtml("ge" + i + "_", ents);
+        const html = this._entListHtml("ge" + i + "_", ents);
+        if (lista._pbcHtml === html) return;
+        lista._pbcHtml = html;
+        lista.innerHTML = html;
         this._bindEntList(lista, "ge" + i + "_", ents.length, (k, d) => this._moveGroupEntity(i, k, d));
       });
     const modes = this._modeList();
     (this._mforms || []).forEach((f, i) => {
-      if (modes[i]) f.data = this._modeToForm(modes[i]);
+      if (modes[i]) poner(f, this._modeToForm(modes[i]));
     });
   }
 
