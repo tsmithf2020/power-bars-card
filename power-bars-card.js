@@ -1,5 +1,5 @@
 /*
- * power-bars-card 1.0.0
+ * power-bars-card
  *
  * Muestra muchos sensores numericos como barras horizontales compactas, en el
  * espacio que ocupaban tres gauges. Pensado para consumos electricos: casi
@@ -9,7 +9,7 @@
  * Local: /local/power-bars-card/power-bars-card.js
  */
 
-const VERSION = "1.7.0";
+const VERSION = "1.8.0";
 
 /* ---------- utilidades ---------- */
 
@@ -86,15 +86,60 @@ function nameOf(hass, id, override) {
   return (st && st.attributes && st.attributes.friendly_name) || id;
 }
 
-// 1578 -> "1578", 0.209 -> "0.2", 1578.5 -> "1579"
-function fmt(v) {
-  if (v === null) return "—";
+// Cuantos decimales lleva un numero. Si la entidad trae `display_precision`
+// (lo que se elige en HA, en la ventana de la entidad), manda esa. Si no:
+//   entero o >= 10 -> ninguno   ("8", no "8.0"; "173", "14")
+//   >= 0,1         -> uno       ("3.4", "0.2")
+//   menor          -> dos       ("0.04", no "0.0")
+function decimalsFor(v, precision) {
+  if (Number.isInteger(precision) && precision >= 0 && precision <= 6) return precision;
   const a = Math.abs(v);
-  if (a >= 100) return String(Math.round(v));
-  if (a >= 10) return v.toFixed(0);
-  if (a >= 1) return v.toFixed(1);
-  if (a === 0) return "0";
-  return v.toFixed(1);
+  if (a === 0 || Number.isInteger(v) || a >= 10) return 0;
+  // 9,96 redondeado a un decimal es "10.0": sin decimales, igual que un 10.
+  if (a >= 0.1) return Math.abs(Number(v.toFixed(1))) >= 10 ? 0 : 1;
+  return 2;
+}
+
+// 1578 -> "1578", 0.209 -> "0.2", 8 -> "8". Con `opt.locale` usa el formato
+// de numeros elegido en el perfil de Home Assistant (coma decimal en español).
+function fmt(v, opt) {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "—";
+  const o = opt || {};
+  const d = decimalsFor(v, o.precision);
+  let n = Number(v.toFixed(d));
+  if (Object.is(n, -0)) n = 0;          // "-0.0" no existe
+  if (!o.locale) return n.toFixed(d);
+  try {
+    return new Intl.NumberFormat(o.locale, {
+      minimumFractionDigits: d,
+      maximumFractionDigits: d,
+      useGrouping: o.grouping !== false,
+    }).format(n);
+  } catch (e) {
+    return n.toFixed(d);
+  }
+}
+
+// Traduce la opcion "Formato de numeros" del perfil de HA a un locale de Intl,
+// igual que el propio frontend.
+function numberLocale(hass) {
+  const l = hass && hass.locale;
+  const lang = (l && l.language) || (hass && hass.language) || null;
+  if (!l && !lang) return null;
+  const nav = typeof navigator !== "undefined" && navigator.language ? navigator.language : "en-US";
+  switch (l && l.number_format) {
+    case "comma_decimal": return { locale: ["en-US", "en"] };
+    case "decimal_comma": return { locale: ["de", "es", "it"] };
+    case "space_comma": return { locale: ["fr", "sv", "cs"] };
+    case "system": return { locale: nav };
+    case "none": return { locale: lang || nav, grouping: false };
+    default: return { locale: lang || nav };
+  }
+}
+
+function precisionOf(hass, id) {
+  const e = hass && hass.entities && id ? hass.entities[id] : null;
+  return e && Number.isInteger(e.display_precision) ? e.display_precision : undefined;
 }
 
 // La escala compartida es lo que hace comparables las barras. Si no se fija un
@@ -111,8 +156,9 @@ function scaleFor(group, vals, cfgMax, modeMax) {
     const n = parseFloat(m);
     if (Number.isFinite(n) && n > 0) return n;
   }
+  // En valor absoluto: una exportacion solar de -3000 W tambien llena la barra.
   let mx = 0;
-  for (const v of vals) if (v !== null && v > mx) mx = v;
+  for (const v of vals) if (v !== null && Math.abs(v) > mx) mx = Math.abs(v);
   return mx > 0 ? mx : 1;
 }
 
@@ -128,6 +174,24 @@ function normModes(cfg) {
   return m.length ? m : [{}];
 }
 
+const PERIODS = ["today", "month", "billing"];
+
+// Un modo que lee OTRA entidad (energia en vez de potencia) cambia la magnitud:
+// el medidor total, los umbrales y las escalas escritos para watts no le sirven.
+function changesQuantity(mode) {
+  return !!(mode && (mode.period || mode.key || mode.replace));
+}
+
+// El total de un modo: el suyo, o el de la tarjeta solo si el modo sigue
+// leyendo la misma magnitud. Sin esto un modo en kWh tomaba el medidor de
+// watts de la tarjeta y la cabecera decia "0 W".
+function totalEntityFor(mode, cfg) {
+  const t = mode && mode.total !== undefined
+    ? mode.total
+    : changesQuantity(mode) ? undefined : cfg.total;
+  return typeof t === "string" && t !== "" && t !== "sum" ? t : null;
+}
+
 // Si un modo declara `unit` y la entidad viene en otra unidad de la misma
 // familia, se convierte. Sin esto un sensor en Wh dentro de una columna de kWh
 // da un numero 1000 veces mas grande sin ninguna senal de que algo va mal.
@@ -140,23 +204,80 @@ function convert(v, de, a) {
   return (v * UNIDADES[de]) / UNIDADES[a];
 }
 
-// Inicio de la ventana de un modo, en hora LOCAL.
+// Año, mes (0-11) y dia de un instante, en la zona horaria pedida. Sin zona,
+// la del navegador.
+function partsIn(d, tz) {
+  if (tz) {
+    try {
+      const f = new Intl.DateTimeFormat("en-US", {
+        timeZone: tz, year: "numeric", month: "numeric", day: "numeric",
+      });
+      const o = {};
+      for (const x of f.formatToParts(d)) o[x.type] = Number(x.value);
+      if (o.year && o.month && o.day) return { y: o.year, m: o.month - 1, day: o.day };
+    } catch (e) {}
+  }
+  return { y: d.getFullYear(), m: d.getMonth(), day: d.getDate() };
+}
+
+// Cuanto adelanta (ms) la zona `tz` a UTC en ese instante.
+function tzOffset(utcMs, tz) {
+  const f = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric",
+    hour: "numeric", minute: "numeric", second: "numeric",
+  });
+  const o = {};
+  for (const x of f.formatToParts(new Date(utcMs))) o[x.type] = Number(x.value);
+  const comoUtc = Date.UTC(o.year, o.month - 1, o.day, o.hour % 24, o.minute, o.second);
+  return comoUtc - Math.floor(utcMs / 1000) * 1000;
+}
+
+// Medianoche de ese dia en la zona `tz`. Se ajusta dos veces por si justo ese
+// dia cambia la hora de verano.
+function midnight(y, m, day, tz) {
+  if (tz) {
+    try {
+      const base = Date.UTC(y, m, day);
+      let t = base - tzOffset(base, tz);
+      t = base - tzOffset(t, tz);
+      return new Date(t);
+    } catch (e) {}
+  }
+  return new Date(y, m, day);
+}
+
+const daysIn = (y, m) => new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+
+// Inicio de la ventana de un modo.
 //   today   -> medianoche de hoy
 //   month   -> dia 1 del mes
 //   billing -> el dia de corte (billing_day). Si hoy es 5 y el corte es 10,
-//              el ciclo vigente empezo el 10 del mes PASADO.
-function periodStart(period, billingDay, now) {
-  const d = now || new Date();
-  if (period === "today") return new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  if (period === "month") return new Date(d.getFullYear(), d.getMonth(), 1);
+//              el ciclo vigente empezo el 10 del mes PASADO. Un corte 29-31 en
+//              un mes mas corto cae en su ultimo dia (antes se volvia dia 1).
+// `tz`: la zona horaria que usa Home Assistant para ese usuario; sin ella, la
+// del navegador.
+function periodStart(period, billingDay, now, tz) {
+  const p = partsIn(now || new Date(), tz);
+  if (period === "today") return midnight(p.y, p.m, p.day, tz);
+  if (period === "month") return midnight(p.y, p.m, 1, tz);
   if (period === "billing") {
     let day = parseInt(billingDay, 10);
-    if (!Number.isFinite(day) || day < 1 || day > 28) day = 1;
-    return d.getDate() >= day
-      ? new Date(d.getFullYear(), d.getMonth(), day)
-      : new Date(d.getFullYear(), d.getMonth() - 1, day);
+    if (!Number.isFinite(day) || day < 1 || day > 31) day = 1;
+    const corteEste = Math.min(day, daysIn(p.y, p.m));
+    if (p.day >= corteEste) return midnight(p.y, p.m, corteEste, tz);
+    const py = p.m === 0 ? p.y - 1 : p.y;
+    const pm = p.m === 0 ? 11 : p.m - 1;
+    return midnight(py, pm, Math.min(day, daysIn(py, pm)), tz);
   }
   return null;
+}
+
+// La zona que usa HA para mostrarle horas a este usuario: la del servidor si
+// asi lo eligio en su perfil, si no la del navegador.
+function haTimeZone(hass) {
+  const l = hass && hass.locale;
+  if (l && l.time_zone === "server" && hass.config && hass.config.time_zone) return hass.config.time_zone;
+  return undefined;
 }
 
 function entityFor(e, mode) {
@@ -171,40 +292,86 @@ function entityFor(e, mode) {
 // El umbral mas especifico gana: entidad, luego grupo, luego tarjeta.
 // Si el MODO define la clave, gana a todos: cambio la magnitud, y los umbrales
 // escritos para watts no valen para kWh.
+// Si el modo cambia de magnitud (lee energia en vez de potencia), NO hereda:
+// un umbral de 5 escrito para watts escondia todo enchufe bajo 5 kWh al dia.
 function pick(key, entCfg, group, cfg, mode) {
   if (mode && mode[key] !== undefined && mode[key] !== null) return mode[key];
+  if (changesQuantity(mode)) return undefined;
   for (const src of [entCfg, group, cfg]) {
     if (src && src[key] !== undefined && src[key] !== null) return src[key];
   }
   return undefined;
 }
 
+// Por defecto 1 (el consumo en espera de un enchufe). En un modo que cambia de
+// magnitud, 0: cualquier energia gastada cuenta.
 function resolveThr(entCfg, group, cfg, mode) {
   const v = pick("zero_threshold", entCfg, group, cfg, mode);
   const n = Number(v);
-  return v === undefined || !Number.isFinite(n) ? 1 : n;
+  return v === undefined || !Number.isFinite(n) ? (changesQuantity(mode) ? 0 : 1) : n;
+}
+
+// Con umbral 0 cuenta como encendido todo lo que no sea exactamente cero.
+function isOn(v, thr) {
+  if (v === null) return false;
+  const a = Math.abs(v);
+  return thr > 0 ? a >= thr : a > 0;
 }
 
 // Un umbral <= 1 se lee como fraccion del maximo de esa barra; > 1 se lee como
-// valor absoluto. Nadie pone un umbral real de 0,8 W, y asi se pueden escribir
-// los dos estilos sin una opcion extra que elegir.
+// valor absoluto.
 function absThr(t, max) {
   return t <= 1 ? t * max : t;
 }
 
-function sevColor(value, max, sev) {
+// Los limites de color, ya en la unidad de la barra. La regla fraccion/absoluto
+// se decide para el objeto ENTERO, no por umbral: `{yellow: 1, red: 3}` en kWh
+// hacia amarillo = 100% del maximo y rojo = 3 kWh. Solo si todos los numeros
+// escritos son <= 1 se leen como fracciones. "50%" es siempre fraccion.
+function sevLimits(sev, max) {
   const s = sev || {};
-  const y = s.yellow === undefined ? 0.5 : s.yellow;
-  const r = s.red === undefined ? 0.8 : s.red;
+  const leer = (x, porDefecto) => {
+    if (x === undefined || x === null || x === "") return { v: porDefecto, pct: true };
+    const t = String(x).trim();
+    if (t.endsWith("%")) return { v: parseFloat(t) / 100, pct: true };
+    return { v: Number(t), pct: null };
+  };
+  const y = leer(s.yellow, 0.5);
+  const r = leer(s.red, 0.8);
+  const escritos = [y, r].filter((p) => p.pct === null && Number.isFinite(p.v));
+  const fraccion = escritos.every((p) => p.v <= 1);
+  const abs = (p) => (p.pct === true || fraccion ? p.v * max : p.v);
+  return { yellow: abs(y), red: abs(r) };
+}
+
+function sevColor(value, max, sev) {
+  const l = sevLimits(sev, max);
   const v = Math.abs(value);
-  if (v >= absThr(r, max)) return "var(--pbc-red)";
-  if (v >= absThr(y, max)) return "var(--pbc-yellow)";
+  if (v >= l.red) return "var(--pbc-red)";
+  if (v >= l.yellow) return "var(--pbc-yellow)";
   return "var(--pbc-green)";
 }
 
-// Solo para leer el total desde _firma sin duplicar la logica de precedencia.
-function cfg2(card) {
-  return { _cfgTotal: card._cfg ? card._cfg.total : undefined };
+// Conversion a una unidad comun. Con `unit` en el modo o en la tarjeta, esa; si
+// no, la de la primera fila con unidad conocida. Asi un enchufe en kW no queda
+// dibujado como si fueran watts al lado de los demas.
+function targetUnit(hass, groups, mode, cfg) {
+  if (mode && mode.unit) return mode.unit;
+  if (cfg && cfg.unit) return cfg.unit;
+  for (const g of groups)
+    for (const e of g.entities) {
+      const id = entityFor(e, mode);
+      const u = id ? unitOf(hass, id) : "";
+      if (FAMILIA[u]) return u;
+    }
+  return "";
+}
+
+// Hash corto y estable de un texto, para claves de localStorage.
+function shortHash(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
 }
 
 function moreInfo(el, entityId) {
@@ -219,12 +386,18 @@ function moreInfo(el, entityId) {
 
 /* ---------- tarjeta ---------- */
 
+const STATS_TTL = 5 * 60 * 1000;          // se vuelven a pedir cada 5 minutos
+const STATS_RETRY_BASE = 15 * 1000;       // tras un error: 15 s, 30 s, 60 s...
+const STATS_RETRY_MAX = 10 * 60 * 1000;   // ...hasta 10 minutos
+
 class PowerBarsCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
     this._built = false;
     this._rows = [];
+    this._cache = {};      // clave del plan -> {data, at, err, fails, retryAt}
+    this._inflight = {};   // clave del plan -> true mientras hay una consulta
   }
 
   static getConfigElement() {
@@ -248,20 +421,36 @@ class PowerBarsCard extends HTMLElement {
     const groups = normGroups(config);
     if (!groups.length)
       throw new Error("Define at least one entity in `entities` or `groups`");
+    const modes = normModes(config);
+    for (const m of modes)
+      if (m.period && !PERIODS.includes(m.period))
+        throw new Error(
+          `Unknown period "${m.period}" in mode "${m.name || ""}". Use ${PERIODS.join(", ")}.`
+        );
     this._cfg = { ...config };
     this._groups = groups;
-    this._modes = normModes(config);
+    this._modes = modes;
     if (this._mi === undefined || this._mi >= this._modes.length)
       this._mi = this._restoreMode();
     this._built = false;
-    if (this._hass) this._render();
+    if (this._hass) {
+      this._maybeFetch();
+      this._render();
+    }
   }
 
   // El modo elegido es una comodidad de quien mira, no estado compartido: vive
   // en su navegador. Puede fallar (ventana privada, cookies bloqueadas) y en
   // ese caso simplemente se arranca en el primero.
+  // La clave lleva un hash de las filas y los modos: con solo el titulo, todas
+  // las tarjetas sin titulo compartian `pbc-mode:-` y se pisaban el modo.
   get _mkey() {
-    return "pbc-mode:" + (this._cfg && this._cfg.title ? this._cfg.title : "-");
+    const c = this._cfg || {};
+    const firma = JSON.stringify([
+      (this._groups || []).map((g) => g.entities.map((e) => e.entity)),
+      (this._modes || []).map((m) => m.name || ""),
+    ]);
+    return "pbc-mode:" + (c.title || "") + ":" + shortHash(firma);
   }
   _restoreMode() {
     try {
@@ -278,69 +467,108 @@ class PowerBarsCard extends HTMLElement {
   // Un modo con `period` no lee el estado actual: suma la energia de la ventana
   // desde las estadisticas de largo plazo, igual que el panel de Energia. Asi
   // funciona desde el primer dia y sin crear un utility_meter por enchufe.
-  async _fetchStats(mode) {
-    const hass = this._hass;
-    if (!hass || !hass.callWS || !mode || !mode.period) return;
-    const start = periodStart(mode.period, this._cfg.billing_day, new Date());
-    if (!start) return;
-
+  // Que estadisticas hay que pedir para el modo en curso, y bajo que clave se
+  // guardan. La clave lleva el modo, el inicio de la ventana y las entidades:
+  // cambiar cualquiera de las tres es otra consulta.
+  _statsPlan() {
+    const mode = this._modes[this._mi] || {};
+    if (!mode.period || !this._hass) return null;
+    const start = periodStart(mode.period, this._cfg.billing_day, new Date(), haTimeZone(this._hass));
+    if (!start) return null;
     const ids = new Set();
     for (const g of this._groups)
       for (const e of g.entities) {
         const id = entityFor(e, mode);
         if (id) ids.add(id);
       }
-    const tcfg = mode.total !== undefined ? mode.total : this._cfg.total;
-    if (typeof tcfg === "string" && tcfg !== "sum") ids.add(tcfg);
-    if (!ids.size) return;
+    const t = totalEntityFor(mode, this._cfg);
+    if (t) ids.add(t);
+    if (!ids.size) return null;
+    const lista = [...ids].sort();
+    return { start, ids: lista, key: this._mi + "|" + start.toISOString() + "|" + lista.join(",") };
+  }
 
-    const clave = this._mi + "|" + start.toISOString();
-    this._statsKey = clave;
+  // Un modo con `period` no lee el estado actual: suma la energia de la ventana
+  // desde las estadisticas, igual que el panel de Energia. Asi funciona sin
+  // crear un utility_meter por enchufe.
+  //
+  // Dos consultas: los dias/horas cerrados salen de la tabla de largo plazo
+  // (por hora), y la hora en curso de la de 5 minutos. Con solo la primera los
+  // valores iban hasta una hora atrasados.
+  async _fetchStats(plan) {
+    const hass = this._hass;
+    const key = plan.key;
+    this._inflight[key] = true;
+    const prev = this._cache[key];
     try {
-      const r = await hass.callWS({
-        type: "recorder/statistics_during_period",
-        start_time: start.toISOString(),
-        end_time: new Date().toISOString(),
-        statistic_ids: [...ids],
-        period: "day",
-        types: ["change"],
-      });
-      const out = {};
-      for (const [id, filas] of Object.entries(r || {})) {
-        let t = 0;
-        for (const f of filas || []) {
-          const c = Number(f.change);
-          if (Number.isFinite(c)) t += c;
+      const ahora = Date.now();
+      const hora = new Date(Math.floor(ahora / 3600000) * 3600000);
+      const corte = hora > plan.start ? hora : plan.start;
+      const pedir = (desde, hasta, period) =>
+        hass.callWS({
+          type: "recorder/statistics_during_period",
+          start_time: desde.toISOString(),
+          end_time: hasta.toISOString(),
+          statistic_ids: plan.ids,
+          period,
+          types: ["change"],
+        });
+      const [largo, corto] = await Promise.all([
+        corte > plan.start ? pedir(plan.start, corte, "day") : Promise.resolve({}),
+        pedir(corte, new Date(ahora), "5minute"),
+      ]);
+      // id -> suma de los cambios. Un id que viene pero con todos los cambios
+      // nulos no es energia (p. ej. una `key` que apunta a un sensor de
+      // potencia): queda null, no 0.
+      const data = {};
+      for (const r of [largo, corto])
+        for (const [id, filas] of Object.entries(r || {})) {
+          if (!(id in data)) data[id] = null;
+          for (const f of filas || []) {
+            if (f.change === null || f.change === undefined) continue;
+            const c = Number(f.change);
+            if (Number.isFinite(c)) data[id] = (data[id] || 0) + c;
+          }
         }
-        out[id] = t;
-      }
-      // Si mientras se esperaba la respuesta cambio el modo, se descarta.
-      if (this._statsKey !== clave) return;
-      this._stats = out;
-      this._statsAt = Date.now();
-      this._statsFor = clave;
-      if (this._built) this._update(true);
+      this._cache[key] = { data, at: Date.now(), err: null, fails: 0 };
     } catch (e) {
-      if (this._statsKey === clave) {
-        this._stats = null;
-        this._statsFor = clave;
-        this._statsErr = String((e && e.message) || e);
-        if (this._built) this._update(true);
-      }
+      // Se conserva lo ultimo bueno, y se reintenta con espera creciente: antes
+      // un error hacia pedir de nuevo en CADA cambio de estado de la casa.
+      const fails = (prev && prev.fails ? prev.fails : 0) + 1;
+      this._cache[key] = {
+        data: prev ? prev.data : null,
+        at: prev ? prev.at : 0,
+        err: String((e && e.message) || e),
+        fails,
+        retryAt: Date.now() + Math.min(STATS_RETRY_MAX, STATS_RETRY_BASE * 2 ** (fails - 1)),
+      };
+    } finally {
+      delete this._inflight[key];
+      this._statsAt = Date.now();
+      if (this._built && this._plan && this._plan.key === key) this._update(true);
     }
   }
 
   _maybeFetch() {
-    const mode = this._modes[this._mi] || {};
-    if (!mode.period) return;
-    const start = periodStart(mode.period, this._cfg.billing_day, new Date());
-    const clave = this._mi + "|" + (start ? start.toISOString() : "");
-    const viejo = !this._statsAt || Date.now() - this._statsAt > 5 * 60 * 1000;
-    if (this._statsFor !== clave || viejo) {
-      if (this._pidiendo === clave && !viejo) return;
-      this._pidiendo = clave;
-      this._fetchStats(mode);
-    }
+    this._plan = this._statsPlan();
+    const plan = this._plan;
+    if (!plan || !this._hass.callWS) return;
+    // Una sola consulta en vuelo por clave. Antes el candado no aplicaba
+    // mientras los datos estuvieran "viejos", y al abrir la tarjeta se pedia
+    // otra vez con cada cambio de estado hasta que llegaba la primera respuesta.
+    if (this._inflight[plan.key]) return;
+    const c = this._cache[plan.key];
+    const ahora = Date.now();
+    if (c && c.err && ahora < c.retryAt) return;
+    if (c && !c.err && ahora - c.at < STATS_TTL) return;
+    this._fetchStats(plan);
+  }
+
+  // Lo que hay para el modo en curso: {data, err} o null si todavia no llega.
+  _statsNow() {
+    const plan = this._plan;
+    const c = plan ? this._cache[plan.key] : null;
+    return c && (c.data || c.err) ? c : null;
   }
 
   _setMode(i) {
@@ -361,15 +589,22 @@ class PowerBarsCard extends HTMLElement {
 
   getCardSize() {
     if (!this._groups) return 3;
+    const two = this._cfg && String(this._cfg.columns) === "2";
     let n = 0;
-    for (const g of this._groups) n += g.entities.length + (g.name ? 1 : 0);
+    for (const g of this._groups)
+      n += (two ? Math.ceil(g.entities.length / 2) : g.entities.length) + (g.name ? 1 : 0);
     return Math.max(2, Math.ceil(n / 2));
+  }
+
+  // Vista de secciones: nunca mas angosta que media seccion, o la barra no cabe.
+  getGridOptions() {
+    return { columns: 12, min_columns: 6 };
   }
 
   get _style() {
     return `
       :host { display: block; }
-      ha-card { padding: 12px 14px 14px; }
+      ha-card { padding: 12px 14px 14px; container-type: inline-size; }
       .title {
         font-size: 1.15rem; font-weight: 500;
         margin: 0 0 10px; color: var(--primary-text-color);
@@ -427,6 +662,8 @@ class PowerBarsCard extends HTMLElement {
       .val .u { font-size: .76em; color: var(--secondary-text-color); margin-left: 1px; }
       .row.off .nm, .row.off .val { color: var(--secondary-text-color); opacity: .65; }
       .row.na .val { color: var(--error-color); }
+      .row.wait .val { color: var(--secondary-text-color); }
+      .row:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 1px; }
       .empty {
         font-size: .82rem; color: var(--secondary-text-color);
         padding: 6px 2px; font-style: italic;
@@ -436,7 +673,10 @@ class PowerBarsCard extends HTMLElement {
         --pbc-yellow: var(--warning-color, #ff9800);
         --pbc-red: var(--error-color, #f44336);
       }
-      @media (max-width: 600px) {
+      /* Segun el ancho de la TARJETA, no de la pantalla: en la vista de
+         secciones una tarjeta angosta en un escritorio seguia a 2 columnas y
+         la barra quedaba en 0 px. */
+      @container (max-width: 460px) {
         .wrap.two { grid-template-columns: 1fr; column-gap: 0; }
         .row { grid-template-columns: var(--pbc-name-w-s, 7.5em) 1fr auto; }
         .nm, .val { font-size: .78rem; }
@@ -479,8 +719,14 @@ class PowerBarsCard extends HTMLElement {
 
     this.shadowRoot.innerHTML = `<style>${this._style}</style>${parts.join("")}`;
 
-    if (cfg.name_width)
-      this.shadowRoot.host.style.setProperty("--pbc-name-w", cfg.name_width);
+    // Las dos variables: la angosta es la que se usa en tarjetas estrechas, y
+    // antes `name_width` no llegaba ahi. Sin la opcion se borran, o quedaba
+    // pegado el valor anterior.
+    const hostStyle = this.shadowRoot.host.style;
+    for (const v of ["--pbc-name-w", "--pbc-name-w-s"]) {
+      if (cfg.name_width) hostStyle.setProperty(v, cfg.name_width);
+      else if (hostStyle.removeProperty) hostStyle.removeProperty(v);
+    }
 
     this._modes.forEach((m, i) => {
       const b = this.shadowRoot.getElementById("m" + i);
@@ -501,19 +747,31 @@ class PowerBarsCard extends HTMLElement {
     const h = this._hass;
     if (!h) return "";
     const mode = this._modes[this._mi] || {};
-    const out = [this._mi, this._statsAt || 0];
-    const ver = (id) => {
+    const usaStats = !!mode.period;
+    const s = this._statsNow();
+    const l = h.locale || {};
+    const out = [this._mi, this._statsAt || 0, s ? s.at + (s.err ? "e" : "") : "-",
+                 [l.language, l.number_format, l.time_zone].join(",")];
+    const ver = (id, conEstado) => {
       if (!id) return;
       const st = h.states[id];
       if (!st) { out.push(id + "|-"); return; }
       const a = st.attributes || {};
-      out.push(id + "|" + st.state + "|" + (a.unit_of_measurement || "") +
-               "|" + (a.friendly_name || ""));
+      const p = precisionOf(h, id);
+      out.push(id + "|" + (conEstado ? st.state : "") + "|" + (a.unit_of_measurement || "") +
+               "|" + (a.friendly_name || "") + "|" + (p === undefined ? "" : p));
     };
     for (const g of this._groups)
-      for (const e of g.entities) ver(entityFor(e, mode));
-    const t = mode.total !== undefined ? mode.total : cfg2(this)._cfgTotal;
-    ver(typeof t === "string" && t !== "sum" ? t : null);
+      for (const e of g.entities) {
+        const id = entityFor(e, mode);
+        // En un modo por periodo el numero sale de las estadisticas: que el
+        // contador avance en vivo no cambia nada de lo que se dibuja, y antes
+        // cada tick de cada medidor redibujaba todos los grupos.
+        ver(id, !usaStats);
+        // El nombre sale siempre de la entidad base, aunque se lea otra.
+        if (id !== e.entity) ver(e.entity, false);
+      }
+    ver(totalEntityFor(mode, this._cfg), !usaStats);
     return out.join(";");
   }
 
@@ -533,16 +791,28 @@ class PowerBarsCard extends HTMLElement {
     // (un tablero general y sus enchufes) la suma cuenta dos veces lo mismo.
     const mode = this._modes[this._mi] || {};
     const usaStats = !!mode.period;
-    const pendiente = usaStats && !this._stats;
+    const stats = usaStats ? this._statsNow() : null;
+    // Todavia no llega nada para ESTE modo y ventana. Se dibuja como "cargando",
+    // no con los numeros de otro periodo ni como error.
+    const pendiente = usaStats && !stats;
+    const nf = numberLocale(hass) || {};
     const statVal = (id) => {
-      if (!this._stats) return null;
-      const v = this._stats[id];
-      return Number.isFinite(v) ? v : null;
+      if (!stats || !stats.data) return null;
+      if (id in stats.data) {
+        const v = stats.data[id];
+        return Number.isFinite(v) ? v : null;
+      }
+      // No vino en la respuesta: la ventana no tiene filas todavia (recien
+      // empieza el dia o el ciclo, o el enchufe es nuevo). Un contador de
+      // energia que existe gasto 0; cualquier otra cosa queda sin dato.
+      const st = hass.states[id];
+      const sc = st && st.attributes ? st.attributes.state_class : null;
+      return sc === "total" || sc === "total_increasing" ? 0 : null;
     };
-    const tcfg = mode.total !== undefined ? mode.total : cfg.total;
-    const totalEnt = typeof tcfg === "string" && tcfg !== "sum" ? tcfg : null;
+    const totalEnt = totalEntityFor(mode, cfg);
+    const target = targetUnit(hass, this._groups, mode, cfg);
     let grand = 0;
-    let unit = mode.unit || cfg.unit || "";
+    let unit = target;
 
     this._groups.forEach((g, gi) => {
       const wrap = this.shadowRoot.getElementById("w" + gi);
@@ -553,9 +823,12 @@ class PowerBarsCard extends HTMLElement {
       // 1. leer
       let items = g.entities.map((e, i) => {
         const id = entityFor(e, mode);           // la entidad de ESTE modo
-        const bruto = id ? (usaStats ? statVal(id) : numState(hass, id)) : null;
+        const bruto = id && !pendiente ? (usaStats ? statVal(id) : numState(hass, id)) : null;
         const uOrig = id ? unitOf(hass, id) : "";
-        const v = mode.unit ? convert(bruto, uOrig, mode.unit) : bruto;
+        // Todo a la unidad comun si es de la misma familia (W/kW, Wh/kWh/MWh).
+        const convierte = !!(target && FAMILIA[uOrig] && FAMILIA[uOrig] === FAMILIA[target]);
+        const v = convierte ? convert(bruto, uOrig, target) : bruto;
+        const u = convierte ? target : mode.unit || uOrig;
         const thr = resolveThr(e, g, cfg, mode);
         return {
           cfg: e,
@@ -563,12 +836,15 @@ class PowerBarsCard extends HTMLElement {
           v,
           i,                                     // orden original, para 'active'
           thr,
-          on: v !== null && Math.abs(v) >= thr,
+          on: isOn(v, thr),
           // El nombre sale SIEMPRE de la entidad base: el friendly_name del
           // sensor de energia suele ser "... Energy Daily" y ensuciaria la
           // columna al cambiar de modo.
           name: nameOf(hass, e.entity, e.name),
-          unit: mode.unit || uOrig,
+          unit: u,
+          // La precision elegida en HA vale para la unidad de la entidad; si se
+          // convirtio a otra, se vuelve a la regla por magnitud.
+          precision: u === uOrig ? precisionOf(hass, id) : undefined,
           existe: !!(id && hass.states && hass.states[id]),
         };
       });
@@ -581,7 +857,9 @@ class PowerBarsCard extends HTMLElement {
 
       // 3. ordenar
       const ordered = shown.slice();
-      const val = (x) => (x.v === null ? -1 : x.v);
+      // En valor absoluto: una exportacion de -3000 W es de lo mas grande que
+      // hay, no algo menor que una fila sin dato.
+      const val = (x) => (x.v === null ? -1 : Math.abs(x.v));
       if (sort === "value") ordered.sort((a, b) => val(b) - val(a));
       else if (sort === "name") ordered.sort((a, b) => a.name.localeCompare(b.name));
       else if (sort === "active")
@@ -605,12 +883,15 @@ class PowerBarsCard extends HTMLElement {
             mode.max === undefined && it.cfg.max !== undefined && Number(it.cfg.max) > 0
               ? Number(it.cfg.max)
               : scale;
-          const frac = it.v === null ? 0 : Math.max(0, Math.min(1, it.v / own));
+          const frac = it.v === null ? 0 : Math.min(1, Math.abs(it.v) / own);
           const col =
             it.cfg.color ||
             sevColor(it.v || 0, own, pick("severity", it.cfg, g, cfg, mode));
-          const cls = "row" + (it.v === null ? " na" : it.on ? "" : " off");
+          const cls = "row" + (pendiente ? " wait" : it.v === null ? " na" : it.on ? "" : " off");
           const u = it.unit || unit;
+          const texto = pendiente
+            ? "…"
+            : fmt(it.v, { locale: nf.locale, grouping: nf.grouping, precision: it.precision });
           // Dos formas de no tener dato en este modo, y conviene distinguirlas:
           // no se pudo derivar ninguna entidad, o se derivo una que no existe.
           // La segunda es la habitual (el enchufe no lleva sensor de energia)
@@ -620,11 +901,15 @@ class PowerBarsCard extends HTMLElement {
             : it.existe
             ? it.name
             : it.name + " — " + it.id + " not found";
+          // Si la entidad de este modo no existe, el click abre la base: abrir
+          // el dialogo de una entidad inexistente no sirve de nada.
+          const destino = it.id && it.existe ? it.id : it.cfg.entity;
           return (
-            `<div class="${cls}" data-e="${esc(it.id || it.cfg.entity)}">` +
+            `<div class="${cls}" data-e="${esc(destino)}" tabindex="0" role="button" ` +
+            `aria-label="${esc(it.name + ": " + texto + " " + u)}">` +
             `<div class="nm" title="${esc(tip)}">${esc(it.name)}</div>` +
-            `<div class="track"><div class="fill" style="width:${(frac * 100).toFixed(1)}%;background:${col}"></div></div>` +
-            `<div class="val">${fmt(it.v)}<span class="u">${esc(u)}</span></div>` +
+            `<div class="track"><div class="fill" style="width:${(frac * 100).toFixed(1)}%;background:${esc(col)}"></div></div>` +
+            `<div class="val">${esc(texto)}<span class="u">${esc(u)}</span></div>` +
             `</div>`
           );
         })
@@ -636,26 +921,39 @@ class PowerBarsCard extends HTMLElement {
 
       wrap.querySelectorAll(".row").forEach((r) => {
         r.onclick = () => moreInfo(this, r.dataset.e);
+        // Con teclado: Enter o espacio hacen lo mismo que el click.
+        r.onkeydown = (ev) => {
+          if (ev.key === "Enter" || ev.key === " ") {
+            if (ev.preventDefault) ev.preventDefault();
+            moreInfo(this, r.dataset.e);
+          }
+        };
       });
     });
 
     const tot = this.shadowRoot.getElementById("tot");
     if (tot) {
-      let v = totalEnt
-        ? usaStats
-          ? statVal(totalEnt)
-          : numState(hass, totalEnt)
-        : grand;
-      if (totalEnt && mode.unit) v = convert(v, unitOf(hass, totalEnt), mode.unit);
-      const u = cfg.unit || (totalEnt ? unitOf(hass, totalEnt) : "") || unit;
+      let v, u, prec;
+      if (totalEnt) {
+        const uT = unitOf(hass, totalEnt);
+        const bruto = pendiente ? null : usaStats ? statVal(totalEnt) : numState(hass, totalEnt);
+        const mismo = !!(target && FAMILIA[uT] && FAMILIA[uT] === FAMILIA[target]);
+        v = mismo ? convert(bruto, uT, target) : bruto;
+        // La etiqueta sigue a la conversion: antes un total en Wh convertido
+        // a kWh salia rotulado "Wh".
+        u = mismo ? target : uT || target;
+        prec = u === uT ? precisionOf(hass, totalEnt) : undefined;
+      } else {
+        v = grand;
+        u = unit;
+      }
+      const err = stats && stats.err;
       tot.innerHTML = pendiente
-        ? `<span class="u">${esc(this._statsErr ? "no data" : "loading…")}</span>`
-        : `${fmt(v)}<span class="u">${esc(u)}</span>`;
-      tot.title = this._statsErr
-        ? this._statsErr
-        : totalEnt
-        ? nameOf(hass, totalEnt)
-        : "Sum of the rows";
+        ? `<span class="u">loading…</span>`
+        : err && !stats.data
+        ? `<span class="u">no data</span>`
+        : `${esc(fmt(v, { locale: nf.locale, grouping: nf.grouping, precision: prec }))}<span class="u">${esc(u)}</span>`;
+      tot.title = err ? err : totalEnt ? nameOf(hass, totalEnt) : "Sum of the rows";
     }
   }
 }
@@ -718,7 +1016,7 @@ const SCHEMA = [
     ],
   },
   { name: "total", selector: { entity: { filter: [{ domain: "sensor" }] } } },
-  { name: "billing_day", selector: { number: { min: 1, max: 28, step: 1, mode: "box" } } },
+  { name: "billing_day", selector: { number: { min: 1, max: 31, step: 1, mode: "box" } } },
   {
     name: "entities",
     selector: { entity: { multiple: true, filter: [{ domain: "sensor" }] } },
@@ -802,6 +1100,13 @@ const MODE_SCHEMA = [
       { name: "max", selector: { text: {} } },
     ],
   },
+  {
+    type: "grid",
+    schema: [
+      { name: "total", selector: { entity: { filter: [{ domain: "sensor" }] } } },
+      { name: "zero_threshold", selector: { number: { min: 0, max: 100000, step: 0.1, mode: "box" } } },
+    ],
+  },
 ];
 
 const MODE_LABELS = {
@@ -811,6 +1116,8 @@ const MODE_LABELS = {
   replace_to: "...with",
   unit: "Unit override",
   max: "Max scale (blank = keep group's, or `auto` to fit the largest)",
+  total: "Total meter for this mode (blank = sum the rows)",
+  zero_threshold: "Off threshold in this mode (blank = 0)",
 };
 
 const BTN =
@@ -946,7 +1253,7 @@ class PowerBarsCardEditor extends HTMLElement {
 
   static _swap(list, i, d) {
     const j = i + d;
-    if (j < 0 || j >= list.length) return null;
+    if (i < 0 || i >= list.length || j < 0 || j >= list.length) return null;
     const out = list.slice();
     [out[i], out[j]] = [out[j], out[i]];
     return out;
@@ -1016,11 +1323,16 @@ class PowerBarsCardEditor extends HTMLElement {
       replace_to: r[1] || "",
       unit: m.unit || "",
       max: m.max === undefined || m.max === null ? "" : String(m.max),
+      total: typeof m.total === "string" ? m.total : "",
+      zero_threshold: m.zero_threshold,
     };
   }
 
   _modeFromForm(v, prev) {
-    const out = {};
+    // Parte del modo anterior: lo que el formulario no maneja (`key`,
+    // `severity`, lo que venga del YAML) no se pierde al guardar.
+    const out = { ...(prev || {}) };
+    for (const k of ["name", "period", "replace", "unit", "max"]) delete out[k];
     if (v.name) out.name = v.name;
     if (v.period) out.period = v.period;
     const f = (v.replace_from || "").trim();
@@ -1029,10 +1341,18 @@ class PowerBarsCardEditor extends HTMLElement {
     if (v.unit) out.unit = v.unit;
     const mx = parseMax(v.max);
     if (mx !== undefined) out.max = mx;
-    // `key`, `severity`, `zero_threshold` y `total` del modo son solo YAML:
-    // se conservan tal cual al guardar desde la UI.
-    for (const k of ["key", "severity", "zero_threshold", "total"])
-      if (prev && prev[k] !== undefined) out[k] = prev[k];
+    // total y umbral: si el formulario los trae, mandan; si no vienen, se deja
+    // lo que habia.
+    if ("total" in v) {
+      if (typeof v.total === "string" && v.total.trim() !== "") out.total = v.total;
+      else delete out.total;
+    }
+    if ("zero_threshold" in v) {
+      const n = Number(v.zero_threshold);
+      if (v.zero_threshold !== undefined && v.zero_threshold !== null && v.zero_threshold !== "" && Number.isFinite(n))
+        out.zero_threshold = n;
+      else delete out.zero_threshold;
+    }
     return out;
   }
 
@@ -1047,14 +1367,16 @@ class PowerBarsCardEditor extends HTMLElement {
   }
 
   _groupFromForm(v, prev) {
-    const out = {};
+    // Igual que en la tarjeta: lo que no maneja el formulario (severity y lo
+    // que venga del YAML) se conserva.
+    const out = { ...(prev || {}) };
+    for (const k of ["name", "max", "zero_threshold", "in_total", "entities"]) delete out[k];
     if (v.name) out.name = v.name;
     const mx = parseMax(v.max);
     if (mx !== undefined) out.max = mx;
-    if (v.zero_threshold !== undefined && v.zero_threshold !== null)
+    if (v.zero_threshold !== undefined && v.zero_threshold !== null && v.zero_threshold !== "")
       out.zero_threshold = Number(v.zero_threshold);
     if (v.in_total === false) out.in_total = false;
-    if (prev && prev.severity) out.severity = prev.severity;   // solo por YAML
     const old = {};
     for (const e of normEntries(prev && prev.entities)) old[e.entity] = e;
     out.entities = (v.entities || []).map((id) => {
@@ -1081,7 +1403,14 @@ class PowerBarsCardEditor extends HTMLElement {
   }
 
   _fromForm(v) {
-    const out = { type: "custom:power-bars-card" };
+    // Parte de la config actual y solo toca las claves de este formulario.
+    // Antes se rearmaba desde cero y cambiar el titulo borraba `severity`,
+    // `unit`, `name_width`, `card_mod` o el `grid_options`/`visibility` que
+    // pone la propia vista de secciones.
+    const out = { ...this._cfg, type: this._cfg.type || "custom:power-bars-card" };
+    for (const k of ["title", "sort", "columns", "hide_zero", "show_total", "zero_threshold",
+                     "max", "total", "billing_day"])
+      delete out[k];
     if (v.title) out.title = v.title;
     if (v.sort && v.sort !== "value") out.sort = v.sort;
     if (String(v.columns) === "2") out.columns = 2;
@@ -1096,6 +1425,7 @@ class PowerBarsCardEditor extends HTMLElement {
     if (v.billing_day !== undefined && v.billing_day !== null && Number(v.billing_day) !== 1)
       out.billing_day = Number(v.billing_day);
     if (Array.isArray(this._cfg.modes) && this._cfg.modes.length) out.modes = this._cfg.modes;
+    else delete out.modes;
 
     // Conserva name/max/color/severity por entidad al reordenar en el selector.
     const prev = {};
@@ -1161,8 +1491,34 @@ class PowerBarsCardEditor extends HTMLElement {
       this._sig = sig;
       this._buildGroups();
       this._buildModes();
+    } else {
+      this._refreshSubforms();
     }
     this._buildButtons();
+  }
+
+  // Con la misma cantidad de grupos y modos no se rehacen (el campo perderia
+  // el foco al escribir), pero sus datos SI se ponen al dia. Antes quedaban
+  // con lo que habia al construirlos: si el YAML cambiaba por fuera, guardar
+  // desde el formulario viejo borraba lo nuevo, y las flechas de reordenar
+  // apuntaban a filas que ya no estaban.
+  _refreshSubforms() {
+    const groups = this._groups();
+    (this._gforms || []).forEach((f, i) => {
+      if (groups[i]) f.data = this._groupToForm(groups[i]);
+    });
+    if (this._gwrap)
+      groups.forEach((g, i) => {
+        const lista = this._gwrap.querySelector("#gl" + i);
+        if (!lista) return;
+        const ents = normEntries(g.entities);
+        lista.innerHTML = this._entListHtml("ge" + i + "_", ents);
+        this._bindEntList(lista, "ge" + i + "_", ents.length, (k, d) => this._moveGroupEntity(i, k, d));
+      });
+    const modes = this._modeList();
+    (this._mforms || []).forEach((f, i) => {
+      if (modes[i]) f.data = this._modeToForm(modes[i]);
+    });
   }
 
   _buildModes() {
@@ -1328,11 +1684,19 @@ if (typeof module !== "undefined" && module.exports) {
     unitOf,
     nameOf,
     fmt,
+    decimalsFor,
+    numberLocale,
     scaleFor,
     sevColor,
+    sevLimits,
     pick,
     resolveThr,
     absThr,
+    isOn,
+    changesQuantity,
+    totalEntityFor,
+    targetUnit,
+    haTimeZone,
     esc,
     PowerBarsCard,
     PowerBarsCardEditor,

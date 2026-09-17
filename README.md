@@ -93,7 +93,7 @@ re-add everything in order.
 | `severity` | `{yellow: 0.5, red: 0.8}` | Colour thresholds — see [Thresholds](#thresholds) |
 | `unit` | from entities | Override the displayed unit |
 | `modes` | — | Header buttons that re-read the rows — see [Modes](#modes--the-same-rows-read-a-different-way) |
-| `billing_day` | `1` | Day of month the billing cycle starts, for `period: billing` |
+| `billing_day` | `1` | Day of month the billing cycle starts, for `period: billing` (1–31; in shorter months it falls on the last day) |
 | `name_width` | `8.5em` | Width of the name column |
 
 ### Per entity
@@ -210,8 +210,11 @@ Two ways to write it, and the card tells them apart on its own:
 | `{yellow: 0.5, red: 0.8}` | **Fraction** of that bar's max |
 | `{yellow: 1000, red: 1800}` | **Absolute** values |
 
-The rule: **≤ 1 is a fraction, > 1 is absolute.** No option to pick. Nobody sets
-a real threshold of 0.8 W, so there is no ambiguity in practice.
+The rule is decided for the **whole** object: if every number you wrote is ≤ 1
+they are fractions, otherwise they are all absolute values. So
+`{yellow: 1, red: 3}` in a kWh mode means 1 kWh and 3 kWh, not "100% of the
+scale and 3 kWh". To be explicit, write a percentage: `{yellow: "50%", red: 3}`
+— a `%` is always a fraction of the bar's max.
 
 ```yaml
 severity: {yellow: 0.5, red: 0.8}           # card, as a fraction
@@ -285,13 +288,27 @@ deliberate: a visible gap beats quietly showing their wattage in a kWh column.
 | `month` | Total for the calendar month |
 | `billing` | Total since the last `billing_day` |
 
-A mode with a `period` doesn't read the entity's state. It sums long-term
-statistics over the window, the same source the Energy dashboard uses — so it
-works from day one, with no `utility_meter` per socket and no waiting for data
-to accumulate.
+A mode with a `period` doesn't read the entity's state. It sums the statistics
+over the window, the same source the Energy dashboard uses — so there is no
+`utility_meter` per socket and no waiting for data to accumulate, as long as
+the sensor already records statistics (`state_class: total` or
+`total_increasing`). Closed hours come from the long-term statistics and the
+hour in progress from the 5-minute ones, so the number is never an hour behind.
+
+Statistics are fetched once when the mode opens and again every 5 minutes —
+never on every state change. If the request fails, the header says *no data*
+(the error is in its tooltip) and it retries after 15 s, 30 s, 60 s… up to 10
+minutes. While a mode is loading, rows read `…` rather than showing another
+period's numbers.
+
+A row whose energy sensor exists but has nothing in the window yet — just
+after midnight, or a new plug — shows `0`. A row whose sensor is not an energy
+counter shows `—`.
 
 `billing_day: 10` means the cycle runs from the 10th to the 10th. On the 5th of
 a month, the cycle in progress started on the 10th of the *previous* month.
+Days are counted in the time zone Home Assistant uses for you: the server's if
+your profile says so, otherwise the browser's.
 
 ### A mode overrides everything
 
@@ -299,12 +316,27 @@ a month, the cycle in progress started on the 10th of the *previous* month.
 the group and the entity**. The quantity changed — a scale of 9900 W and a
 threshold of 5 W are meaningless once the column is in kWh.
 
+For the same reason, a mode that reads **other entities** (`key`, `replace` or
+`period`) does not inherit `total`, `severity` or `zero_threshold` from the
+card, the group or the row. Without its own `total` it sums the rows; without
+its own `zero_threshold` any non-zero reading counts as on. The mode editor has
+fields for both.
+
 ### Units are converted automatically
 
-If a mode declares `unit: kWh` and a row's entity reports `Wh`, the value is
-converted. Mixing them silently would show that row 1000× too large and it would
-look like the biggest consumer in the house. Handled for `W`/`kW` and
-`Wh`/`kWh`/`MWh`; anything else is left alone.
+Every row is shown in one unit: the mode's `unit`, else the card's `unit`, else
+the unit of the first row. A plug reporting `kW` among `W` rows, or `Wh` among
+`kWh` rows, is converted — mixing them silently would draw that row 1000× off
+and it would look like the biggest (or smallest) consumer in the house. The
+total's label follows the conversion. Handled for `W`/`kW` and `Wh`/`kWh`/`MWh`;
+anything else is left alone.
+
+### Numbers
+
+Numbers use the number format of your Home Assistant profile (`3.157,5` or
+`3,157.5`), and an entity's display precision if you set one in its settings.
+Otherwise: whole numbers without decimals (`8`, not `8.0`), one decimal below 10,
+two below 0.1.
 
 ## Not just power
 
@@ -337,8 +369,7 @@ If one of those fits your case better, use it.
 node test/smoke.js
 ```
 
-390 assertions, no dependencies — there is a small DOM shim inside the test file
-itself. `_render()` and `_update()` are called for real and the resulting HTML
+No dependencies — there is a small DOM shim inside the test file itself. `_render()` and `_update()` are called for real and the resulting HTML
 is inspected, rather than simulated.
 
 The suite is validated by deliberately breaking the card and checking that tests
