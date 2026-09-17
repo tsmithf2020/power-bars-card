@@ -862,7 +862,7 @@ class PowerBarsCard extends HTMLElement {
       /* Sin dato: un hueco a proposito, no un error. Barra punteada y guion gris. */
       .row.na .nm { color: var(--secondary-text-color); }
       .row.na .val { color: var(--secondary-text-color); font-weight: 400; }
-      .row.na .track { background: transparent; box-shadow: inset 0 0 0 1px var(--pbc-track); }
+      .row.na .track { background: transparent; border: 1px dashed var(--pbc-track); box-sizing: border-box; }
       .row.wait .val { color: var(--secondary-text-color); font-weight: 400; }
 
       .empty {
@@ -1517,6 +1517,10 @@ class PowerBarsCardEditor extends HTMLElement {
     const y0 = ev.clientY;
     let hasta = desde;
     try { asa.setPointerCapture(ev.pointerId); } catch (e) {}
+    // Mientras dura el arrastre las listas no se rehacen: si HA devuelve la
+    // config (por una tecla en otro campo), borrar la manija que tiene el
+    // puntero capturado perdia el movimiento sin avisar.
+    this._arrastrando = true;
     asa.style.cursor = "grabbing";
     fila.style.position = "relative";
     fila.style.zIndex = "2";
@@ -1540,6 +1544,7 @@ class PowerBarsCardEditor extends HTMLElement {
       asa.removeEventListener("pointermove", mover);
       asa.removeEventListener("pointerup", soltar);
       asa.removeEventListener("pointercancel", soltar);
+      this._arrastrando = false;
       asa.style.cursor = "grab";
       filas.forEach((f) => {
         f.style.transition = "";
@@ -1804,10 +1809,16 @@ class PowerBarsCardEditor extends HTMLElement {
       if (this._hass) this._form.hass = this._hass;
     }
 
-    if (this._elist) {
+    // Igual que las listas de los grupos: solo se rehace si cambio, y nunca en
+    // medio de un arrastre.
+    if (this._elist && !this._arrastrando) {
       const ents = this._hasGroups ? [] : normEntries(this._cfg.entities);
-      this._elist.innerHTML = this._entListHtml("e", ents);
-      this._bindEntList(this._elist, "e", ents.length, (desde, hasta) => this._moveEntityTo(desde, hasta));
+      const html = this._entListHtml("e", ents);
+      if (this._elist._pbcHtml !== html) {
+        this._elist._pbcHtml = html;
+        this._elist.innerHTML = html;
+        this._bindEntList(this._elist, "e", ents.length, (desde, hasta) => this._moveEntityTo(desde, hasta));
+      }
     }
 
     const sig = this._groups().length + ":" + this._modeList().length;
@@ -1845,7 +1856,7 @@ class PowerBarsCardEditor extends HTMLElement {
         if (!lista) return;
         const ents = normEntries(g.entities);
         const html = this._entListHtml("ge" + i + "_", ents);
-        if (lista._pbcHtml === html) return;
+        if (this._arrastrando || lista._pbcHtml === html) return;
         lista._pbcHtml = html;
         lista.innerHTML = html;
         this._bindEntList(lista, "ge" + i + "_", ents.length, (k, h) => this._moveGroupEntityTo(i, k, h));

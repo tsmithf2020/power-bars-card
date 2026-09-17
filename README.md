@@ -291,8 +291,8 @@ the row shows as unavailable — it does not fall back to the base entity.**
 Falling back would quietly put watts in a kWh column, which is worse than a
 visible gap. The tooltip says which entity is missing.
 
-The same card, switched to the billing-cycle mode — same rows, same order,
-kWh instead of watts:
+The same card, switched to the billing-cycle mode — same rows, read in kWh
+instead of watts, and sorted by what each one used in the cycle:
 
 ![The card in billing-cycle mode](https://raw.githubusercontent.com/tsmithf2020/power-bars-card/master/docs/billing.png)
 
