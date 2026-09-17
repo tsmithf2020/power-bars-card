@@ -9,7 +9,7 @@
  * Local: /local/power-bars-card/power-bars-card.js
  */
 
-const VERSION = "1.8.0";
+const VERSION = "2.0.0";
 
 /* ---------- idioma ---------- */
 
@@ -72,6 +72,7 @@ const I18N = {
     useGroupsHelp: "Groups get their own heading and their own scale. The entities you already have move into the first group.",
     addMode: "+ Add mode",
     addModeHelp: "Modes put buttons in the header to read the same rows a different way — live watts, or kWh over a period.",
+    drag: "Drag to reorder",
   },
   es: {
     nothingOn: "nada encendido",
@@ -128,6 +129,7 @@ const I18N = {
     useGroupsHelp: "Cada grupo tiene su propio título y su propia escala. Las entidades que ya tienes pasan al primer grupo.",
     addMode: "+ Agregar modo",
     addModeHelp: "Los modos ponen botones en la cabecera para leer las mismas filas de otra forma: watts en vivo, o kWh de un período.",
+    drag: "Arrastra para ordenar",
   },
 };
 
@@ -273,8 +275,9 @@ function precisionOf(hass, id) {
 
 // La escala compartida es lo que hace comparables las barras. Si no se fija un
 // max, se usa el mayor valor presente para que siempre haya una barra llena.
-function scaleFor(group, vals, cfgMax, modeMax) {
-  // El max del modo pisa al del grupo: en kWh las escalas de watts no sirven.
+// El max que manda para un grupo, o null si la escala es automatica.
+// El max del modo pisa al del grupo: en kWh las escalas de watts no sirven.
+function fixedMax(group, cfgMax, modeMax) {
   const m =
     modeMax !== undefined && modeMax !== null
       ? modeMax
@@ -285,7 +288,18 @@ function scaleFor(group, vals, cfgMax, modeMax) {
     const n = parseFloat(m);
     if (Number.isFinite(n) && n > 0) return n;
   }
+  return null;
+}
+
+function scaleIsFixed(group, cfgMax, modeMax) {
+  return fixedMax(group, cfgMax, modeMax) !== null;
+}
+
+function scaleFor(group, vals, cfgMax, modeMax) {
+  const fijo = fixedMax(group, cfgMax, modeMax);
+  if (fijo !== null) return fijo;
   // En valor absoluto: una exportacion solar de -3000 W tambien llena la barra.
+  // (ver scaleIsFixed: misma precedencia, pero solo dice si hay un max fijo)
   let mx = 0;
   for (const v of vals) if (v !== null && Math.abs(v) > mx) mx = Math.abs(v);
   return mx > 0 ? mx : 1;
@@ -548,7 +562,7 @@ class PowerBarsCard extends HTMLElement {
           hass.states[id].attributes.device_class === "power"
       )
       .slice(0, 6);
-    return { type: "custom:power-bars-card", title: "Consumos", entities: ids };
+    return { type: "custom:power-bars-card", title: txt(hass).stubTitle, entities: ids };
   }
 
   setConfig(config) {
@@ -748,102 +762,148 @@ class PowerBarsCard extends HTMLElement {
 
   get _style() {
     return `
-      :host { display: block; }
-      ha-card { padding: 12px 14px 14px; container-type: inline-size; }
-      .title {
-        font-size: 1.15rem; font-weight: 500;
-        margin: 0 0 10px; color: var(--primary-text-color);
-        display: flex; align-items: baseline; gap: 8px;
+      :host {
+        display: block;
+        --pbc-green: var(--success-color, #4caf50);
+        --pbc-yellow: var(--warning-color, #ff9800);
+        --pbc-red: var(--error-color, #f44336);
+        --pbc-bar: var(--primary-color, #03a9f4);
+        --pbc-track: var(--divider-color, rgba(0, 0, 0, .12));
       }
+      ha-card { padding: 12px 14px 12px; container-type: inline-size; }
+
+      /* Cabecera: titulo, botones de modo y total. Sin titulo no queda un
+         hueco a la izquierda de los botones. */
+      .head {
+        display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
+        margin: 0 0 8px; min-height: 28px;
+      }
+      .title { font-size: 1.15rem; font-weight: 500; color: var(--primary-text-color); }
       .total {
-        margin-left: auto; font-size: 1rem; font-weight: 500;
+        margin-left: auto; font-size: 1.05rem; font-weight: 500; white-space: nowrap;
         color: var(--primary-text-color); font-variant-numeric: tabular-nums;
       }
-      .total .u { font-size: .78em; color: var(--secondary-text-color); margin-left: 2px; }
-      .modes { display: flex; gap: 4px; margin-left: 8px; }
+      .u { font-size: .8em; font-weight: 400; color: var(--secondary-text-color); margin-left: .2em; }
+      .modes { display: flex; flex-wrap: wrap; gap: 6px; }
       .modes button {
-        font: inherit; font-size: .72rem; padding: 2px 8px; cursor: pointer;
-        border: 1px solid var(--divider-color); border-radius: 999px;
-        background: transparent; color: var(--secondary-text-color);
+        font: inherit; font-size: .8rem; line-height: 1.2; min-height: 28px;
+        padding: 4px 12px; cursor: pointer; border-radius: 999px;
+        border: 1px solid var(--divider-color); background: transparent;
+        color: var(--primary-text-color);
       }
+      .modes button:hover { background: var(--secondary-background-color); }
       .modes button.sel {
         background: var(--primary-color); border-color: var(--primary-color);
         color: var(--text-primary-color, #fff);
       }
+      .modes button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+
       .grp {
         font-size: .74rem; font-weight: 600; letter-spacing: .07em;
         text-transform: uppercase; color: var(--secondary-text-color);
-        margin: 12px 0 5px; padding-bottom: 3px;
+        margin: 12px 0 4px; padding-bottom: 3px;
         border-bottom: 1px solid var(--divider-color);
       }
       .grp:first-of-type { margin-top: 2px; }
-      .wrap { display: grid; grid-template-columns: 1fr; gap: 1px; }
-      .wrap.two { grid-template-columns: 1fr 1fr; column-gap: 18px; }
+
+      .wrap { display: grid; grid-template-columns: 1fr; gap: 0; }
+      .wrap.two { grid-template-columns: 1fr 1fr; column-gap: 20px; }
+
       .row {
-        display: grid; align-items: center;
-        grid-template-columns: var(--pbc-name-w, 8.5em) 1fr auto;
-        gap: 8px; padding: 3px 2px; border-radius: 5px;
-        cursor: pointer; min-height: 22px;
+        display: grid; align-items: center; column-gap: 8px;
+        padding: 3px 4px; border-radius: 6px; cursor: pointer;
       }
       .row:hover { background: var(--secondary-background-color); }
+      .row:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 1px; }
       .nm {
-        font-size: .82rem; color: var(--primary-text-color);
+        grid-area: nm; min-width: 0; font-size: .84rem; color: var(--primary-text-color);
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
+      .val {
+        grid-area: val; font-size: .84rem; font-weight: 500; white-space: nowrap;
+        font-variant-numeric: tabular-nums; color: var(--primary-text-color); text-align: right;
+      }
       .track {
-        position: relative; height: 8px; border-radius: 4px;
-        background: var(--divider-color); overflow: hidden;
+        grid-area: bar; position: relative; overflow: hidden; background: var(--pbc-track);
       }
       .fill {
         position: absolute; inset: 0 auto 0 0; width: 0%;
-        border-radius: 4px; background: var(--pbc-green);
+        border-radius: inherit; background: var(--pbc-bar);
         transition: width .35s ease, background-color .35s ease;
       }
-      .val {
-        font-size: .82rem; font-variant-numeric: tabular-nums;
-        color: var(--primary-text-color); text-align: right;
-        min-width: 3.6em;
+      /* Algo encendido nunca queda invisible: 7 W en una escala de 5500 W
+         igual deja una marca. */
+      .row:not(.off):not(.na):not(.wait) .fill { min-width: 3px; }
+
+      /* Apilado (por defecto): nombre y valor arriba, la barra debajo a todo
+         el ancho. En dos columnas la barra pasa de ~40 px a todo el ancho. */
+      .wrap.stacked .row {
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas: "nm val" "bar bar";
+        row-gap: 3px; padding-top: 4px; padding-bottom: 5px;
       }
-      .val .u { font-size: .76em; color: var(--secondary-text-color); margin-left: 1px; }
-      .row.off .nm, .row.off .val { color: var(--secondary-text-color); opacity: .65; }
-      .row.na .val { color: var(--error-color); }
-      .row.wait .val { color: var(--secondary-text-color); }
-      .row:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 1px; }
+      .wrap.stacked .track { height: 5px; border-radius: 3px; }
+
+      /* En linea: nombre, barra y valor en una fila, como antes de 2.0. */
+      .wrap.inline .row {
+        grid-template-columns: var(--pbc-name-w, 8.5em) minmax(0, 1fr) auto;
+        grid-template-areas: "nm bar val"; min-height: 22px;
+      }
+      .wrap.inline .track { height: 8px; border-radius: 4px; }
+      /* Mismas medidas que en 1.x. El ancho del nombre va en em de la fila,
+         asi que la letra se fija en la fila y no solo en el texto. */
+      .wrap.inline .row { font-size: .82rem; }
+      .wrap.inline .nm, .wrap.inline .val { font-size: 1em; }
+      .wrap.inline .val { min-width: 3.2em; }
+
+      /* Apagadas: gris legible (antes con opacidad quedaban bajo 3:1). */
+      .row.off .nm, .row.off .val { color: var(--secondary-text-color); font-weight: 400; }
+      .row.off .track { opacity: .6; }
+      /* Sin dato: un hueco a proposito, no un error. Barra punteada y guion gris. */
+      .row.na .nm { color: var(--secondary-text-color); }
+      .row.na .val { color: var(--secondary-text-color); font-weight: 400; }
+      .row.na .track { background: transparent; box-shadow: inset 0 0 0 1px var(--pbc-track); }
+      .row.wait .val { color: var(--secondary-text-color); font-weight: 400; }
+
       .empty {
         font-size: .82rem; color: var(--secondary-text-color);
-        padding: 6px 2px; font-style: italic;
+        padding: 6px 4px; font-style: italic;
       }
-      :host {
-        --pbc-green: var(--success-color, #4caf50);
-        --pbc-yellow: var(--warning-color, #ff9800);
-        --pbc-red: var(--error-color, #f44336);
+
+      /* Segun el ancho de la TARJETA, no de la pantalla. */
+      @container (max-width: 300px) {
+        .wrap.two.stacked { grid-template-columns: 1fr; column-gap: 0; }
       }
-      /* Segun el ancho de la TARJETA, no de la pantalla: en la vista de
-         secciones una tarjeta angosta en un escritorio seguia a 2 columnas y
-         la barra quedaba en 0 px. */
       @container (max-width: 400px) {
-        .wrap.two { grid-template-columns: 1fr; column-gap: 0; }
-        .row { grid-template-columns: var(--pbc-name-w-s, 7.5em) 1fr auto; }
-        .nm, .val { font-size: .78rem; }
+        .wrap.two.inline { grid-template-columns: 1fr; column-gap: 0; }
+        .wrap.inline .row { grid-template-columns: var(--pbc-name-w-s, 7.5em) minmax(0, 1fr) auto; }
+        .wrap.inline .nm, .wrap.inline .val { font-size: .78rem; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .fill { transition: none; }
       }
     `;
   }
 
   _render() {
     const cfg = this._cfg;
+    const T = txt(this._hass);
     const two = cfg.columns === 2 || cfg.columns === "2";
+    const layout = cfg.layout === "inline" ? "inline" : "stacked";
     const parts = [];
 
     const varios = this._modes.length > 1;
     parts.push(`<ha-card>`);
     if (cfg.title || cfg.show_total !== false || varios) {
-      parts.push(`<div class="title"><span>${esc(cfg.title || "")}</span>`);
+      parts.push(`<div class="head">`);
+      if (cfg.title) parts.push(`<span class="title">${esc(cfg.title)}</span>`);
       if (varios) {
-        parts.push(`<span class="modes">`);
+        parts.push(`<span class="modes" role="group">`);
         this._modes.forEach((m, i) => {
+          const sel = i === this._mi;
           parts.push(
-            `<button id="m${i}" class="${i === this._mi ? "sel" : ""}">${esc(
-              m.name || "Mode " + (i + 1)
+            `<button id="m${i}" class="${sel ? "sel" : ""}" aria-pressed="${sel}">${esc(
+              m.name || T.mode + " " + (i + 1)
             )}</button>`
           );
         });
@@ -857,8 +917,8 @@ class PowerBarsCard extends HTMLElement {
     this._rows = [];
     this._groups.forEach((g, gi) => {
       if (g.name) parts.push(`<div class="grp" id="g${gi}">${esc(g.name)}</div>`);
-      parts.push(`<div class="wrap${two ? " two" : ""}" id="w${gi}"></div>`);
-      parts.push(`<div class="empty" id="e${gi}" style="display:none">nothing on</div>`);
+      parts.push(`<div class="wrap ${layout}${two ? " two" : ""}" id="w${gi}"></div>`);
+      parts.push(`<div class="empty" id="e${gi}" style="display:none">${esc(T.nothingOn)}</div>`);
     });
     parts.push(`</ha-card>`);
 
@@ -930,7 +990,10 @@ class PowerBarsCard extends HTMLElement {
     this._ultimaFirma = firma;
 
     const hideZero = cfg.hide_zero === true;
-    const sort = cfg.sort || "value";
+    // Desde 2.0 el orden por defecto es `active`: con `value` una nevera que
+    // se prende y se apaga reordenaba media tarjeta.
+    const sort = cfg.sort || "active";
+    const T = txt(hass);
     // `total` puede ser el entity_id de un medidor. Sumar todas las filas solo
     // es correcto si son circuitos independientes; cuando unos cuelgan de otros
     // (un tablero general y sus enchufes) la suma cuenta dos veces lo mismo.
@@ -1019,21 +1082,30 @@ class PowerBarsCard extends HTMLElement {
       // 4. escala compartida del grupo: se calcula sobre TODO el grupo, no solo
       //    sobre lo visible, para que esconder los apagados no reescale nada.
       const scale = scaleFor(g, items.map((i) => i.v), cfg.max, mode.max);
+      const escalaFija = scaleIsFixed(g, cfg.max, mode.max);
 
       // 5. pintar
       const html = ordered
         .map((it) => {
           // En un modo con escala propia, el max por entidad tampoco aplica.
-          const own =
-            mode.max === undefined && it.cfg.max !== undefined && Number(it.cfg.max) > 0
-              ? Number(it.cfg.max)
-              : scale;
+          const maxPropio =
+            mode.max === undefined && it.cfg.max !== undefined && Number(it.cfg.max) > 0;
+          const own = maxPropio ? Number(it.cfg.max) : scale;
           const frac = it.v === null ? 0 : Math.min(1, Math.abs(it.v) / own);
+          // Color: el propio de la fila; si no, verde/amarillo/rojo solo cuando
+          // significa algo (hay umbrales escritos o la escala es fija). Con
+          // escala automatica la fila mayor siempre llegaba al 100% y salia
+          // roja: desde 2.0 va en el color del tema.
+          const sev = pick("severity", it.cfg, g, cfg, mode);
           const col =
             it.cfg.color ||
-            sevColor(it.v || 0, own, pick("severity", it.cfg, g, cfg, mode));
+            (sev !== undefined || maxPropio || escalaFija
+              ? sevColor(it.v || 0, own, sev)
+              : "var(--pbc-bar)");
           const cls = "row" + (pendiente ? " wait" : it.v === null ? " na" : it.on ? "" : " off");
-          const u = it.unit || unit;
+          const sinDato = !pendiente && it.v === null;
+          // Un hueco no lleva unidad: "—" solo, en gris.
+          const u = sinDato ? "" : it.unit || unit;
           const texto = pendiente
             ? "…"
             : fmt(it.v, { locale: nf.locale, grouping: nf.grouping, precision: it.precision });
@@ -1042,19 +1114,19 @@ class PowerBarsCard extends HTMLElement {
           // La segunda es la habitual (el enchufe no lleva sensor de energia)
           // y sin el nombre derivado no hay por donde empezar a mirar.
           const tip = !it.id
-            ? it.name + " — no entity for this mode"
+            ? it.name + " — " + T.noEntityForMode
             : it.existe
             ? it.name
-            : it.name + " — " + it.id + " not found";
+            : it.name + " — " + it.id + " " + T.notFound;
           // Si la entidad de este modo no existe, el click abre la base: abrir
           // el dialogo de una entidad inexistente no sirve de nada.
           const destino = it.id && it.existe ? it.id : it.cfg.entity;
           return (
             `<div class="${cls}" data-e="${esc(destino)}" tabindex="0" role="button" ` +
-            `aria-label="${esc(it.name + ": " + texto + " " + u)}">` +
+            `aria-label="${esc(tip + ": " + texto + (u ? " " + u : ""))}">` +
             `<div class="nm" title="${esc(tip)}">${esc(it.name)}</div>` +
-            `<div class="track"><div class="fill" style="width:${(frac * 100).toFixed(1)}%;background:${esc(col)}"></div></div>` +
             `<div class="val">${esc(texto)}<span class="u">${esc(u)}</span></div>` +
+            `<div class="track"><div class="fill" style="width:${(frac * 100).toFixed(1)}%;background:${esc(col)}"></div></div>` +
             `</div>`
           );
         })
@@ -1094,11 +1166,11 @@ class PowerBarsCard extends HTMLElement {
       }
       const err = stats && stats.err;
       tot.innerHTML = pendiente
-        ? `<span class="u">loading…</span>`
+        ? `<span class="u">${esc(T.loading)}</span>`
         : err && !stats.data
-        ? `<span class="u">no data</span>`
+        ? `<span class="u">${esc(T.noData)}</span>`
         : `${esc(fmt(v, { locale: nf.locale, grouping: nf.grouping, precision: prec }))}<span class="u">${esc(u)}</span>`;
-      tot.title = err ? err : totalEnt ? nameOf(hass, totalEnt) : "Sum of the rows";
+      tot.title = err ? err : totalEnt ? nameOf(hass, totalEnt) : T.sumOfRows;
     }
   }
 }
@@ -1113,157 +1185,170 @@ function esc(s) {
 
 /* ---------- editor ---------- */
 
-const SCHEMA = [
-  { name: "title", selector: { text: {} } },
-  {
-    type: "grid",
-    schema: [
-      {
-        name: "sort",
-        selector: {
-          select: {
-            mode: "dropdown",
-            options: [
-              { value: "active", label: "Active first (idle rows keep my order)" },
-              { value: "value", label: "By value (highest first)" },
-              { value: "config", label: "My own order (as listed below)" },
-              { value: "name", label: "By name" },
-            ],
+// Los esquemas se arman con los textos del idioma de quien edita.
+function cardSchema(T) {
+  return [
+    { name: "title", selector: { text: {} } },
+    {
+      type: "grid",
+      schema: [
+        {
+          name: "sort",
+          selector: {
+            select: {
+              mode: "dropdown",
+              options: [
+                { value: "active", label: T.sortActive },
+                { value: "value", label: T.sortValue },
+                { value: "config", label: T.sortConfig },
+                { value: "name", label: T.sortName },
+              ],
+            },
           },
         },
-      },
-      {
-        name: "columns",
-        selector: {
-          select: {
-            mode: "dropdown",
-            options: [
-              { value: "1", label: "1 column" },
-              { value: "2", label: "2 columns" },
-            ],
+        {
+          name: "columns",
+          selector: {
+            select: {
+              mode: "dropdown",
+              options: [
+                { value: "1", label: T.col1 },
+                { value: "2", label: T.col2 },
+              ],
+            },
           },
         },
-      },
-    ],
-  },
-  {
-    type: "grid",
-    schema: [
-      { name: "hide_zero", selector: { boolean: {} } },
-      { name: "show_total", selector: { boolean: {} } },
-    ],
-  },
-  {
-    type: "grid",
-    schema: [
-      { name: "zero_threshold", selector: { number: { min: 0, max: 100, step: 0.5, mode: "box" } } },
-      { name: "max", selector: { text: {} } },
-    ],
-  },
-  { name: "total", selector: { entity: { filter: [{ domain: "sensor" }] } } },
-  { name: "billing_day", selector: { number: { min: 1, max: 31, step: 1, mode: "box" } } },
-  {
-    name: "entities",
-    selector: { entity: { multiple: true, filter: [{ domain: "sensor" }] } },
-  },
-];
-
-const LABELS = {
-  title: "Title",
-  sort: "Sort order",
-  columns: "Columns",
-  hide_zero: "Hide rows that are off",
-  show_total: "Show total in the header",
-  zero_threshold: "Off threshold",
-  max: "Max scale (blank = automatic)",
-  total: "Total meter (blank = sum the rows)",
-  billing_day: "Billing cycle starts on day",
-  entities: "Entities",
-};
-
-const GROUP_SCHEMA = [
-  {
-    type: "grid",
-    schema: [
-      { name: "name", selector: { text: {} } },
-      { name: "max", selector: { text: {} } },
-    ],
-  },
-  {
-    type: "grid",
-    schema: [
-      { name: "zero_threshold", selector: { number: { min: 0, max: 1000, step: 0.5, mode: "box" } } },
-      { name: "in_total", selector: { boolean: {} } },
-    ],
-  },
-  {
-    name: "entities",
-    selector: { entity: { multiple: true, filter: [{ domain: "sensor" }] } },
-  },
-];
-
-const GROUP_LABELS = {
-  name: "Group name",
-  max: "Max scale (number, or `auto`)",
-  zero_threshold: "Off threshold",
-  in_total: "Include in total",
-  entities: "Group entities",
-};
-
-const MODE_SCHEMA = [
-  {
-    type: "grid",
-    schema: [
-      { name: "name", selector: { text: {} } },
-      {
-        name: "period",
-        selector: {
-          select: {
-            mode: "dropdown",
-            options: [
-              { value: "", label: "Live value" },
-              { value: "today", label: "Total since midnight" },
-              { value: "month", label: "Total this calendar month" },
-              { value: "billing", label: "Total this billing cycle" },
-            ],
-          },
+      ],
+    },
+    {
+      name: "layout",
+      selector: {
+        select: {
+          mode: "dropdown",
+          options: [
+            { value: "stacked", label: T.layoutStacked },
+            { value: "inline", label: T.layoutInline },
+          ],
         },
       },
-    ],
-  },
-  {
-    type: "grid",
-    schema: [
-      { name: "replace_from", selector: { text: {} } },
-      { name: "replace_to", selector: { text: {} } },
-    ],
-  },
-  {
-    type: "grid",
-    schema: [
-      { name: "unit", selector: { text: {} } },
-      { name: "max", selector: { text: {} } },
-    ],
-  },
-  {
-    type: "grid",
-    schema: [
-      { name: "total", selector: { entity: { filter: [{ domain: "sensor" }] } } },
-      { name: "zero_threshold", selector: { number: { min: 0, max: 100000, step: 0.1, mode: "box" } } },
-    ],
-  },
-];
+    },
+    {
+      type: "grid",
+      schema: [
+        { name: "hide_zero", selector: { boolean: {} } },
+        { name: "show_total", selector: { boolean: {} } },
+      ],
+    },
+    {
+      type: "grid",
+      schema: [
+        { name: "zero_threshold", selector: { number: { min: 0, max: 100, step: 0.5, mode: "box" } } },
+        { name: "max", selector: { text: {} } },
+      ],
+    },
+    { name: "total", selector: { entity: { filter: [{ domain: "sensor" }] } } },
+    { name: "billing_day", selector: { number: { min: 1, max: 31, step: 1, mode: "box" } } },
+    {
+      name: "entities",
+      selector: { entity: { multiple: true, filter: [{ domain: "sensor" }] } },
+    },
+  ];
+}
 
-const MODE_LABELS = {
-  name: "Button label",
-  period: "Reads",
-  replace_from: "Replace in entity id",
-  replace_to: "...with",
-  unit: "Unit override",
-  max: "Max scale (blank = keep group's, or `auto` to fit the largest)",
-  total: "Total meter for this mode (blank = sum the rows)",
-  zero_threshold: "Off threshold in this mode (blank = 0)",
-};
+// Etiquetas del formulario principal: la clave del campo es la del texto.
+const cardLabel = (T, name) => T[name] || name;
+
+function groupSchema() {
+  return [
+    {
+      type: "grid",
+      schema: [
+        { name: "name", selector: { text: {} } },
+        { name: "max", selector: { text: {} } },
+      ],
+    },
+    {
+      type: "grid",
+      schema: [
+        { name: "zero_threshold", selector: { number: { min: 0, max: 1000, step: 0.5, mode: "box" } } },
+        { name: "in_total", selector: { boolean: {} } },
+      ],
+    },
+    {
+      name: "entities",
+      selector: { entity: { multiple: true, filter: [{ domain: "sensor" }] } },
+    },
+  ];
+}
+
+function groupLabel(T, name) {
+  return {
+    name: T.groupName,
+    max: T.groupMax,
+    zero_threshold: T.zero_threshold,
+    in_total: T.inTotal,
+    entities: T.groupEntities,
+  }[name] || name;
+}
+
+function modeSchema(T) {
+  return [
+    {
+      type: "grid",
+      schema: [
+        { name: "name", selector: { text: {} } },
+        {
+          name: "period",
+          selector: {
+            select: {
+              mode: "dropdown",
+              options: [
+                { value: "", label: T.periodLive },
+                { value: "today", label: T.periodToday },
+                { value: "month", label: T.periodMonth },
+                { value: "billing", label: T.periodBilling },
+              ],
+            },
+          },
+        },
+      ],
+    },
+    {
+      type: "grid",
+      schema: [
+        { name: "replace_from", selector: { text: {} } },
+        { name: "replace_to", selector: { text: {} } },
+      ],
+    },
+    {
+      type: "grid",
+      schema: [
+        { name: "unit", selector: { text: {} } },
+        { name: "max", selector: { text: {} } },
+      ],
+    },
+    {
+      type: "grid",
+      schema: [
+        { name: "total", selector: { entity: { filter: [{ domain: "sensor" }] } } },
+        { name: "zero_threshold", selector: { number: { min: 0, max: 100000, step: 0.1, mode: "box" } } },
+      ],
+    },
+  ];
+}
+
+function modeLabel(T, name) {
+  return {
+    name: T.modeName,
+    period: T.period,
+    replace_from: T.replaceFrom,
+    replace_to: T.replaceTo,
+    unit: T.unit,
+    max: T.modeMax,
+    total: T.modeTotal,
+    zero_threshold: T.modeThreshold,
+  }[name] || name;
+}
 
 const BTN =
   "padding:4px 10px;margin-right:6px;border:1px solid var(--divider-color);" +
@@ -1317,7 +1402,7 @@ class PowerBarsCardEditor extends HTMLElement {
 
   _addGroup() {
     const g = this._groups();
-    g.push({ name: "Group " + (g.length + 1), entities: [] });
+    g.push({ name: txt(this._hass).group + " " + (g.length + 1), entities: [] });
     this._saveGroups(g, true);
   }
 
@@ -1341,7 +1426,7 @@ class PowerBarsCardEditor extends HTMLElement {
     const cfg = { ...this._cfg };
     delete cfg.entities;
     cfg.groups = (this._cfg.groups || []).concat(
-      flat.length ? [{ name: "Group 1", entities: flat }] : [{ name: "Group 1", entities: [] }]
+      flat.length ? [{ name: txt(this._hass).group + " 1", entities: flat }] : [{ name: txt(this._hass).group + " 1", entities: [] }]
     );
     this._emit(cfg);
     this._render(true);
@@ -1350,35 +1435,41 @@ class PowerBarsCardEditor extends HTMLElement {
   /* --- reordenar entidades --- */
 
   // El selector de entidades de HA no deja reordenar: para cambiar el orden
-  // habria que borrarlas todas y volver a ponerlas. Estas flechas mueven una
-  // fila sin tocar el resto. Solo se muestran con `sort: config` o `active`,
-  // que son los unicos ordenes donde el orden escrito se nota.
+  // habria que borrarlas todas y volver a ponerlas. Esta lista se ordena
+  // arrastrando cada fila desde su manija. Solo se muestra con `sort: config`
+  // o `active`, que son los unicos ordenes donde el orden escrito se nota.
   get _ordenImporta() {
-    const s = this._cfg.sort || "value";
+    const s = this._cfg.sort || "active";
     return s === "config" || s === "active";
   }
 
   _entListHtml(pref, ents) {
     if (!this._ordenImporta || ents.length < 2) return "";
+    const T = txt(this._hass);
     const st = this._hass && this._hass.states;
     return (
-      `<div style="margin:2px 0 6px">` +
+      `<div class="pbc-list" style="margin:2px 0 6px;display:flex;flex-direction:column;gap:2px">` +
       ents
         .map((e, i) => {
           const id = e.entity;
           const fn = (st && st[id] && st[id].attributes.friendly_name) || "";
-          const txt = e.name || fn || id;
+          const nombre = e.name || fn || id;
           return (
-            `<div style="display:flex;align-items:center;gap:4px;padding:1px 0">` +
+            `<div class="pbc-row" data-i="${i}" style="display:flex;align-items:center;gap:6px;` +
+            `padding:2px 4px;border-radius:6px;background:var(--card-background-color);` +
+            `user-select:none">` +
+            // La manija: con mouse o con el dedo se arrastra; con teclado,
+            // flecha arriba/abajo mueve la fila.
+            `<span class="pbc-handle" id="${pref}h${i}" tabindex="0" role="button" ` +
+            `aria-label="${esc(T.drag + ": " + nombre)}" title="${esc(T.drag)}" ` +
+            `style="display:inline-flex;align-items:center;justify-content:center;width:28px;` +
+            `height:28px;cursor:grab;touch-action:none;color:var(--secondary-text-color);` +
+            `border-radius:6px">` +
+            `<ha-icon icon="mdi:drag" style="--mdc-icon-size:20px"></ha-icon></span>` +
             `<span style="width:1.6em;text-align:right;font-size:.72rem;` +
             `color:var(--secondary-text-color)">${i + 1}.</span>` +
             `<span title="${esc(id)}" style="flex:1;font-size:.8rem;overflow:hidden;` +
-            `text-overflow:ellipsis;white-space:nowrap">${esc(txt)}</span>` +
-            `<button id="${pref}u${i}" style="${BTN}"${i === 0 ? " disabled" : ""} ` +
-            `title="Move up">&#9650;</button>` +
-            `<button id="${pref}d${i}" style="${BTN}"${
-              i === ents.length - 1 ? " disabled" : ""
-            } title="Move down">&#9660;</button>` +
+            `text-overflow:ellipsis;white-space:nowrap">${esc(nombre)}</span>` +
             `</div>`
           );
         })
@@ -1387,39 +1478,121 @@ class PowerBarsCardEditor extends HTMLElement {
     );
   }
 
-  _bindEntList(root, pref, n, mover) {
+  // `moveTo(desde, hasta)` mueve la fila `desde` a la posicion `hasta`.
+  _bindEntList(root, pref, n, moveTo) {
     for (let i = 0; i < n; i++) {
-      const u = root.querySelector("#" + pref + "u" + i);
-      const d = root.querySelector("#" + pref + "d" + i);
-      if (u) u.onclick = () => mover(i, -1);
-      if (d) d.onclick = () => mover(i, 1);
+      const asa = root.querySelector("#" + pref + "h" + i);
+      if (!asa) continue;
+      asa.onkeydown = (ev) => {
+        const d = ev.key === "ArrowUp" ? -1 : ev.key === "ArrowDown" ? 1 : 0;
+        if (!d || i + d < 0 || i + d >= n) return;
+        if (ev.preventDefault) ev.preventDefault();
+        this._refocus = pref + "h" + (i + d);   // el foco sigue a la fila movida
+        moveTo(i, i + d);
+      };
+      asa.onpointerdown = (ev) => this._dragStart(ev, root, asa, i, moveTo);
     }
+    // Tras mover con teclado la lista se rehace: se devuelve el foco a la manija.
+    if (this._refocus) {
+      const destino = root.querySelector("#" + this._refocus);
+      if (destino && destino.focus) {
+        this._refocus = null;
+        destino.focus();
+      }
+    }
+  }
+
+  // Arrastre con eventos de puntero: sirve igual con mouse y con el dedo (el
+  // drag and drop nativo del navegador no funciona en pantallas tactiles).
+  // Mientras se arrastra, la fila sigue al puntero y las demas se corren para
+  // abrirle espacio; al soltar recien se guarda, una sola vez.
+  _dragStart(ev, root, asa, desde, moveTo) {
+    if (ev.button !== undefined && ev.button !== 0) return;
+    const filas = [...root.querySelectorAll(".pbc-row")];
+    const fila = filas[desde];
+    if (!fila || !fila.getBoundingClientRect) return;
+    if (ev.preventDefault) ev.preventDefault();
+    const rects = filas.map((f) => f.getBoundingClientRect());
+    const paso = rects.length > 1 ? rects[1].top - rects[0].top : rects[0].height;
+    const y0 = ev.clientY;
+    let hasta = desde;
+    try { asa.setPointerCapture(ev.pointerId); } catch (e) {}
+    asa.style.cursor = "grabbing";
+    fila.style.position = "relative";
+    fila.style.zIndex = "2";
+    fila.style.boxShadow = "0 2px 8px rgba(0,0,0,.25)";
+
+    const mover = (e) => {
+      const dy = Math.max(rects[0].top - rects[desde].top,
+        Math.min(rects[rects.length - 1].top - rects[desde].top, e.clientY - y0));
+      fila.style.transform = `translateY(${dy}px)`;
+      hasta = Math.max(0, Math.min(filas.length - 1, desde + Math.round(dy / paso)));
+      filas.forEach((f, k) => {
+        if (k === desde) return;
+        let corre = 0;
+        if (desde < hasta && k > desde && k <= hasta) corre = -paso;
+        if (desde > hasta && k >= hasta && k < desde) corre = paso;
+        f.style.transition = "transform .15s ease";
+        f.style.transform = corre ? `translateY(${corre}px)` : "";
+      });
+    };
+    const soltar = () => {
+      asa.removeEventListener("pointermove", mover);
+      asa.removeEventListener("pointerup", soltar);
+      asa.removeEventListener("pointercancel", soltar);
+      asa.style.cursor = "grab";
+      filas.forEach((f) => {
+        f.style.transition = "";
+        f.style.transform = "";
+      });
+      fila.style.position = "";
+      fila.style.zIndex = "";
+      fila.style.boxShadow = "";
+      if (hasta !== desde) moveTo(desde, hasta);
+    };
+    asa.addEventListener("pointermove", mover);
+    asa.addEventListener("pointerup", soltar);
+    asa.addEventListener("pointercancel", soltar);
+  }
+
+  // Mueve el elemento `desde` a la posicion `hasta`; null si alguno no existe.
+  static _moveTo(list, desde, hasta) {
+    if (desde < 0 || desde >= list.length || hasta < 0 || hasta >= list.length || desde === hasta)
+      return null;
+    const out = list.slice();
+    const [x] = out.splice(desde, 1);
+    out.splice(hasta, 0, x);
+    return out;
   }
 
   static _swap(list, i, d) {
     const j = i + d;
     if (i < 0 || i >= list.length || j < 0 || j >= list.length) return null;
-    const out = list.slice();
-    [out[i], out[j]] = [out[j], out[i]];
-    return out;
+    return PowerBarsCardEditor._moveTo(list, i, j);
   }
 
-  _moveEntity(i, d) {
-    const ents = normEntries(this._cfg.entities);
-    const out = PowerBarsCardEditor._swap(ents, i, d);
+  _moveEntityTo(desde, hasta) {
+    const out = PowerBarsCardEditor._moveTo(normEntries(this._cfg.entities), desde, hasta);
     if (!out) return;
-    const cfg = { ...this._cfg, entities: out.map(simplify) };
-    this._emit(cfg);
+    this._emit({ ...this._cfg, entities: out.map(simplify) });
     this._render(true);
   }
 
-  _moveGroupEntity(gi, i, d) {
+  _moveEntity(i, d) {
+    this._moveEntityTo(i, i + d);
+  }
+
+  _moveGroupEntityTo(gi, desde, hasta) {
     const gs = this._groups();
     if (!gs[gi]) return;
-    const out = PowerBarsCardEditor._swap(normEntries(gs[gi].entities), i, d);
+    const out = PowerBarsCardEditor._moveTo(normEntries(gs[gi].entities), desde, hasta);
     if (!out) return;
     gs[gi] = { ...gs[gi], entities: out.map(simplify) };
     this._saveGroups(gs, true);
+  }
+
+  _moveGroupEntity(gi, i, d) {
+    this._moveGroupEntityTo(gi, i, i + d);
   }
 
   /* --- modos --- */
@@ -1440,8 +1613,8 @@ class PowerBarsCardEditor extends HTMLElement {
   // tal cual esta escrita, o al activar modos se romperia la tarjeta entera.
   _addMode() {
     const m = this._modeList();
-    if (!m.length) m.push({ name: "Now" });
-    m.push({ name: "Mode " + (m.length + 1) });
+    if (!m.length) m.push({ name: txt(this._hass).now });
+    m.push({ name: txt(this._hass).mode + " " + (m.length + 1) });
     this._saveModes(m, true);
   }
 
@@ -1535,7 +1708,8 @@ class PowerBarsCardEditor extends HTMLElement {
     const c = this._cfg;
     return {
       title: c.title || "",
-      sort: c.sort || "value",
+      sort: c.sort || "active",
+      layout: c.layout === "inline" ? "inline" : "stacked",
       columns: String(c.columns || 1),
       hide_zero: c.hide_zero === true,
       show_total: c.show_total !== false,
@@ -1553,11 +1727,12 @@ class PowerBarsCardEditor extends HTMLElement {
     // `unit`, `name_width`, `card_mod` o el `grid_options`/`visibility` que
     // pone la propia vista de secciones.
     const out = { ...this._cfg, type: this._cfg.type || "custom:power-bars-card" };
-    for (const k of ["title", "sort", "columns", "hide_zero", "show_total", "zero_threshold",
+    for (const k of ["title", "sort", "layout", "columns", "hide_zero", "show_total", "zero_threshold",
                      "max", "total", "billing_day"])
       delete out[k];
     if (v.title) out.title = v.title;
-    if (v.sort && v.sort !== "value") out.sort = v.sort;
+    if (v.sort && v.sort !== "active") out.sort = v.sort;
+    if (v.layout === "inline") out.layout = "inline";
     if (String(v.columns) === "2") out.columns = 2;
     if (v.hide_zero) out.hide_zero = true;
     if (v.show_total === false) out.show_total = false;
@@ -1610,7 +1785,7 @@ class PowerBarsCardEditor extends HTMLElement {
       this._mwrap = this.querySelector("#mwrap");
       this._mbtns = this.querySelector("#mbtns");
       if (this._form) {
-        this._form.computeLabel = (s) => LABELS[s.name] || s.name;
+        this._form.computeLabel = (s) => cardLabel(txt(this._hass), s.name);
         this._form.addEventListener("value-changed", (ev) => {
           ev.stopPropagation();
           this._emit(this._fromForm(ev.detail.value));
@@ -1621,9 +1796,10 @@ class PowerBarsCardEditor extends HTMLElement {
     }
 
     if (this._form) {
+      const esquema = cardSchema(txt(this._hass));
       this._form.schema = this._hasGroups
-        ? SCHEMA.filter((x) => x.name !== "entities")   // las entidades van por grupo
-        : SCHEMA;
+        ? esquema.filter((x) => x.name !== "entities")   // las entidades van por grupo
+        : esquema;
       this._form.data = this._toForm();
       if (this._hass) this._form.hass = this._hass;
     }
@@ -1631,7 +1807,7 @@ class PowerBarsCardEditor extends HTMLElement {
     if (this._elist) {
       const ents = this._hasGroups ? [] : normEntries(this._cfg.entities);
       this._elist.innerHTML = this._entListHtml("e", ents);
-      this._bindEntList(this._elist, "e", ents.length, (i, d) => this._moveEntity(i, d));
+      this._bindEntList(this._elist, "e", ents.length, (desde, hasta) => this._moveEntityTo(desde, hasta));
     }
 
     const sig = this._groups().length + ":" + this._modeList().length;
@@ -1672,7 +1848,7 @@ class PowerBarsCardEditor extends HTMLElement {
         if (lista._pbcHtml === html) return;
         lista._pbcHtml = html;
         lista.innerHTML = html;
-        this._bindEntList(lista, "ge" + i + "_", ents.length, (k, d) => this._moveGroupEntity(i, k, d));
+        this._bindEntList(lista, "ge" + i + "_", ents.length, (k, h) => this._moveGroupEntityTo(i, k, h));
       });
     const modes = this._modeList();
     (this._mforms || []).forEach((f, i) => {
@@ -1684,18 +1860,19 @@ class PowerBarsCardEditor extends HTMLElement {
     if (!this._mwrap) return;
     this._mforms = [];
     const modes = this._modeList();
+    const T = txt(this._hass);
     this._mwrap.innerHTML = modes.length
       ? `<div style="margin-top:16px;font-size:.8rem;font-weight:600;` +
-        `text-transform:uppercase;letter-spacing:.06em;color:var(--secondary-text-color)">Modes</div>` +
+        `text-transform:uppercase;letter-spacing:.06em;color:var(--secondary-text-color)">${esc(T.modes)}</div>` +
         modes
           .map(
             (m, i) =>
               `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--divider-color)">` +
               `<div style="display:flex;align-items:center;margin-bottom:6px">` +
-              `<b style="flex:1;font-size:.85rem">${esc(m.name || "Mode " + (i + 1))}</b>` +
-              `<button id="mup${i}" style="${BTN}" title="Move up">&#9650;</button>` +
-              `<button id="mdn${i}" style="${BTN}" title="Move down">&#9660;</button>` +
-              `<button id="mrm${i}" style="${BTN}" title="Delete">&#10005;</button>` +
+              `<b style="flex:1;font-size:.85rem">${esc(m.name || T.mode + " " + (i + 1))}</b>` +
+              `<button id="mup${i}" style="${BTN}" title="${esc(T.moveUp)}">&#9650;</button>` +
+              `<button id="mdn${i}" style="${BTN}" title="${esc(T.moveDown)}">&#9660;</button>` +
+              `<button id="mrm${i}" style="${BTN}" title="${esc(T.remove)}">&#10005;</button>` +
               `</div><ha-form id="mf${i}"></ha-form></div>`
           )
           .join("")
@@ -1704,8 +1881,8 @@ class PowerBarsCardEditor extends HTMLElement {
     modes.forEach((m, i) => {
       const f = this._mwrap.querySelector("#mf" + i);
       if (f) {
-        f.computeLabel = (x) => MODE_LABELS[x.name] || x.name;
-        f.schema = MODE_SCHEMA;
+        f.computeLabel = (x) => modeLabel(txt(this._hass), x.name);
+        f.schema = modeSchema(txt(this._hass));
         f.data = this._modeToForm(m);
         if (this._hass) f.hass = this._hass;
         f.addEventListener("value-changed", (ev) => {
@@ -1730,15 +1907,16 @@ class PowerBarsCardEditor extends HTMLElement {
     if (!this._gwrap) return;
     this._gforms = [];
     const groups = this._groups();
+    const T = txt(this._hass);
     this._gwrap.innerHTML = groups
       .map(
         (g, i) =>
           `<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--divider-color)">` +
           `<div style="display:flex;align-items:center;margin-bottom:6px">` +
-          `<b style="flex:1;font-size:.85rem">${esc(g.name || "Group " + (i + 1))}</b>` +
-          `<button id="up${i}" style="${BTN}" title="Move up">&#9650;</button>` +
-          `<button id="dn${i}" style="${BTN}" title="Move down">&#9660;</button>` +
-          `<button id="rm${i}" style="${BTN}" title="Delete">&#10005;</button>` +
+          `<b style="flex:1;font-size:.85rem">${esc(g.name || T.group + " " + (i + 1))}</b>` +
+          `<button id="up${i}" style="${BTN}" title="${esc(T.moveUp)}">&#9650;</button>` +
+          `<button id="dn${i}" style="${BTN}" title="${esc(T.moveDown)}">&#9660;</button>` +
+          `<button id="rm${i}" style="${BTN}" title="${esc(T.remove)}">&#10005;</button>` +
           `</div><ha-form id="gf${i}"></ha-form><div id="gl${i}"></div></div>`
       )
       .join("");
@@ -1746,8 +1924,8 @@ class PowerBarsCardEditor extends HTMLElement {
     groups.forEach((g, i) => {
       const f = this._gwrap.querySelector("#gf" + i);
       if (f) {
-        f.computeLabel = (s) => GROUP_LABELS[s.name] || s.name;
-        f.schema = GROUP_SCHEMA;
+        f.computeLabel = (s) => groupLabel(txt(this._hass), s.name);
+        f.schema = groupSchema();
         f.data = this._groupToForm(g);
         if (this._hass) f.hass = this._hass;
         f.addEventListener("value-changed", (ev) => {
@@ -1762,8 +1940,8 @@ class PowerBarsCardEditor extends HTMLElement {
       if (lista) {
         const ents = normEntries(g.entities);
         lista.innerHTML = this._entListHtml("ge" + i + "_", ents);
-        this._bindEntList(lista, "ge" + i + "_", ents.length, (k, d) =>
-          this._moveGroupEntity(i, k, d)
+        this._bindEntList(lista, "ge" + i + "_", ents.length, (k, h) =>
+          this._moveGroupEntityTo(i, k, h)
         );
       }
       const bind = (id, fn) => {
@@ -1778,12 +1956,12 @@ class PowerBarsCardEditor extends HTMLElement {
 
   _buildButtons() {
     if (!this._gbtns) return;
+    const T = txt(this._hass);
     this._gbtns.innerHTML = this._hasGroups
-      ? `<button id="add" style="${BTN}">+ Add group</button>`
-      : `<button id="conv" style="${BTN}">Use groups</button>` +
+      ? `<button id="add" style="${BTN}">${esc(T.addGroup)}</button>`
+      : `<button id="conv" style="${BTN}">${esc(T.useGroups)}</button>` +
         `<div style="font-size:.78rem;color:var(--secondary-text-color);margin-top:6px">` +
-        `Groups get their own heading and their own scale. The entities you ` +
-        `already have move into the first group.</div>`;
+        `${esc(T.useGroupsHelp)}</div>`;
     const add = this._gbtns.querySelector("#add");
     if (add) add.onclick = () => this._addGroup();
     const conv = this._gbtns.querySelector("#conv");
@@ -1791,12 +1969,11 @@ class PowerBarsCardEditor extends HTMLElement {
 
     if (this._mbtns) {
       this._mbtns.innerHTML =
-        `<button id="madd" style="${BTN}">+ Add mode</button>` +
+        `<button id="madd" style="${BTN}">${esc(T.addMode)}</button>` +
         (this._modeList().length
           ? ""
           : `<div style="font-size:.78rem;color:var(--secondary-text-color);margin-top:6px">` +
-            `Modes put buttons in the header to read the same rows a different ` +
-            `way — live watts, or kWh over a period.</div>`);
+            `${esc(T.addModeHelp)}</div>`);
       const ma = this._mbtns.querySelector("#madd");
       if (ma) ma.onclick = () => this._addMode();
     }

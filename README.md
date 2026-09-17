@@ -11,7 +11,7 @@ horizontal bars — in the space three gauges used to take.
 
 ---
 
-![The card in live mode](docs/power.png)
+![The card in live mode](https://raw.githubusercontent.com/tsmithf2020/power-bars-card/master/docs/live.png)
 
 ## Why this exists
 
@@ -57,6 +57,21 @@ url: /local/power-bars-card/power-bars-card.js
 type: module
 ```
 
+### Upgrading from 1.x
+
+2.0 changes three defaults. Nothing breaks, but the card looks different:
+
+| | 1.x | 2.0 | To keep the old one |
+|---|---|---|---|
+| Row layout | name, bar and value on one line | name and value on top, a full-width bar below | `layout: inline` |
+| Sort order | `value` | `active` | `sort: value` |
+| Bar colour with an automatic scale | green / yellow / red | the theme's primary colour | set `max` or `severity` |
+
+The colours changed because with an automatic scale the largest row is always at
+100% and was always red, whatever it drew. Green, yellow and red still apply as
+soon as the scale is fixed (`max` on the card, group or row) or you write
+`severity`.
+
 ## Quick start
 
 ```yaml
@@ -69,12 +84,14 @@ entities:
 ```
 
 There is a **visual editor**, including group and mode management — you never
-have to touch YAML if you don't want to.
+have to touch YAML if you don't want to. It follows your Home Assistant
+language: Spanish for `es`, English for everything else. So does the card.
 
 Home Assistant's entity picker can't reorder what's already in it, so with
-`sort: config` or `sort: active` the editor adds ▲▼ next to each row. Moving one
-entity doesn't disturb the others, and you never have to clear the list and
-re-add everything in order.
+`sort: active` or `sort: config` the editor shows the rows as a list you **drag
+by the ⠿ handle** — with the mouse or with a finger in the mobile app. With the
+keyboard, focus a handle and press ↑ or ↓. Moving one entity doesn't disturb the
+others, and you never have to clear the list and re-add everything in order.
 
 ## Options
 
@@ -83,18 +100,19 @@ re-add everything in order.
 | `title` | — | Card heading |
 | `entities` | — | Flat list of entities |
 | `groups` | — | List of `{name, max, entities, ...}` — see [Groups](#groups) |
-| `sort` | `value` | `active`, `value`, `config` or `name` — see [Sorting](#sorting) |
-| `columns` | `1` | `1` or `2`. Always falls back to 1 under 600 px |
+| `sort` | `active` | `active`, `value`, `config` or `name` — see [Sorting](#sorting) |
+| `layout` | `stacked` | `stacked`: name and value on top, bar below. `inline`: all on one line |
+| `columns` | `1` | `1` or `2`. Falls back to 1 when the card itself is narrow (under 300 px stacked, 400 px inline) |
 | `hide_zero` | `false` | Hide rows below the threshold entirely |
 | `zero_threshold` | `1` | Below this a row counts as *off* (greyed out) |
 | `show_total` | `true` | Show the total in the top right |
 | `total` | `sum` | Entity id of the meter that gives the total — see [Totals](#totals) |
 | `max` | auto | Bar scale. Without it, the largest current value is used |
-| `severity` | `{yellow: 0.5, red: 0.8}` | Colour thresholds — see [Thresholds](#thresholds) |
+| `severity` | `{yellow: 0.5, red: 0.8}` | Colour thresholds — see [Thresholds](#thresholds). Only used when written, or when the scale is fixed |
 | `unit` | from entities | Override the displayed unit |
 | `modes` | — | Header buttons that re-read the rows — see [Modes](#modes--the-same-rows-read-a-different-way) |
 | `billing_day` | `1` | Day of month the billing cycle starts, for `period: billing` (1–31; in shorter months it falls on the last day) |
-| `name_width` | `8.5em` | Width of the name column |
+| `name_width` | `8.5em` | Width of the name column, in `layout: inline` |
 
 ### Per entity
 
@@ -178,7 +196,7 @@ groups:
 
 Sorting always happens **within a group**, never across groups.
 
-`active` is usually what you want: with `value`, a fridge cycling on and off
+`active` is the default since 2.0: with `value`, a fridge cycling on and off
 re-orders half the card. With `active`, only the fridge moves.
 
 ## Thresholds
@@ -231,9 +249,11 @@ whatever the group says" while `auto` means "fit the largest row" — which is
 usually what you want when the mode changes the quantity, because a scale in
 watts is meaningless in kWh.
 
-> **Note:** if `max` is automatic, the largest row is always at 100% of the
-> scale and therefore always red. For colours to mean anything, either set a
-> `max` or write `severity` in absolute values, which doesn't depend on scale.
+**When colours apply.** With an automatic `max` the largest row is always at
+100% of the scale, so a colour based on that fraction says nothing — it used to
+be always red. Since 2.0 bars use the theme's primary colour unless the scale is
+fixed (`max` on the card, the group or the row) or you write `severity`
+somewhere. A row's own `color` always wins.
 
 ## Modes — the same rows, read a different way
 
@@ -274,10 +294,14 @@ visible gap. The tooltip says which entity is missing.
 The same card, switched to the billing-cycle mode — same rows, same order,
 kWh instead of watts:
 
-![The card in billing-cycle mode](docs/mes.png)
+![The card in billing-cycle mode](https://raw.githubusercontent.com/tsmithf2020/power-bars-card/master/docs/billing.png)
 
-Two rows show `—` because those plugs have no energy sensor at all. That is
-deliberate: a visible gap beats quietly showing their wattage in a kWh column.
+Two rows show a grey `—` and an empty, outlined bar because those plugs have no
+energy sensor at all. That is deliberate: a visible gap beats quietly showing
+their wattage in a kWh column. Hover the name to see which entity is missing.
+
+The bars here use the theme colour because this mode sets `max: auto`; the live
+mode above keeps green/yellow/red because its groups have a fixed `max`.
 
 ### Periods
 
@@ -337,6 +361,21 @@ Numbers use the number format of your Home Assistant profile (`3.157,5` or
 `3,157.5`), and an entity's display precision if you set one in its settings.
 Otherwise: whole numbers without decimals (`8`, not `8.0`), one decimal below 10,
 two below 0.1.
+
+## Layout and themes
+
+Rows are stacked by default: name and value on one line, the bar underneath
+across the full width. In two columns that makes each bar about five times wider
+than putting all three on one line, at nearly the same height. `layout: inline`
+brings back the one-line row.
+
+Two columns fall back to one when the **card** is narrow, not the screen — so a
+half-width card in the sections view still reads well. Colours come from your
+theme, so it works in light and dark mode:
+
+![Dark theme, narrow card](https://raw.githubusercontent.com/tsmithf2020/power-bars-card/master/docs/dark.png)
+
+Rows are keyboard-accessible: Tab to a row, Enter opens its more-info dialog.
 
 ## Not just power
 
